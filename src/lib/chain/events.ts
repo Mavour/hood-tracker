@@ -142,7 +142,19 @@ async function getLogsOnce(params: {
   }
 }
 
-/** Blockscout-based event fetching — bypasses Alchemy getLogs limits */
+/** Cache of V3 token transfers per address, fetched once per index run */
+const v3TransferCache = new Map<string, Array<{ tx_hash: string; block_number: number; tokenId: string }>>();
+
+export function setV3TransferCache(owner: string, items: Array<{ tx_hash: string; block_number: number; tokenId: string }>) {
+  v3TransferCache.set(owner.toLowerCase(), items);
+}
+
+export function clearV3TransferCache() {
+  v3TransferCache.clear();
+}
+
+/** Blockscout-based event fetching — bypasses Alchemy getLogs limits.
+ *  Uses address token-transfers API (more reliable than per-instance API). */
 async function getLogsViaBlockscout(params: {
   event:
     | typeof increaseEvent
@@ -170,17 +182,28 @@ async function getLogsViaBlockscout(params: {
   const logs: LogLike[] = [];
 
   try {
-    // Get token transfers from Blockscout
-    const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${npm}/instances/${tokenId}/transfers`;
-    const res = await withTimeout(fetch(xferUrl), params.timeoutMs);
-    if (!res.ok) return [];
-    const data = (await res.json()) as {
-      items?: Array<{ tx_hash?: string; block_number?: number; log_index?: number }>;
-    };
+    // Try address-based cache first (populated by indexer)
+    let txs: Array<{ tx_hash: string; block_number: number }> = [];
+    for (const [, items] of v3TransferCache) {
+      const matches = items.filter((t) => t.tokenId === tokenId.toString());
+      txs = matches.map((t) => ({ tx_hash: t.tx_hash, block_number: t.block_number }));
+      if (txs.length) break;
+    }
 
-    for (const t of data.items ?? []) {
-      if (!t.tx_hash) continue;
+    // Fallback to per-instance API
+    if (!txs.length) {
+      const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${npm}/instances/${tokenId}/transfers`;
+      const res = await withTimeout(fetch(xferUrl), params.timeoutMs);
+      if (!res.ok) return [];
+      const data = (await res.json()) as {
+        items?: Array<{ tx_hash?: string; block_number?: number }>;
+      };
+      for (const t of data.items ?? []) {
+        if (t.tx_hash) txs.push({ tx_hash: t.tx_hash, block_number: t.block_number ?? 0 });
+      }
+    }
 
+    for (const t of txs) {
       // Get tx logs from Blockscout
       const logUrl = `${ROBINHOOD.explorer}/api/v2/transactions/${t.tx_hash}/logs`;
       const logRes = await withTimeout(fetch(logUrl), params.timeoutMs);
@@ -197,23 +220,17 @@ async function getLogsViaBlockscout(params: {
         if ((l.topics?.[0] ?? "") !== wantedTopic) continue;
         if ((l.address?.hash ?? "").toLowerCase() !== npm.toLowerCase()) continue;
 
-        // Decode: bytes 64-96 = amount0, bytes 96-128 = amount1 for Increase/Decrease
-        // For Collect: bytes 0-32 = amount0, bytes 32-64 = amount1
         const hex = (l.data ?? "0x").startsWith("0x") ? (l.data ?? "0x").slice(2) : (l.data ?? "");
         let amount0 = 0n;
         let amount1 = 0n;
 
         if (params.event === collectEvent) {
-          // Collect(address recipient, uint256 amount0, uint256 amount1)
-          // non-indexed: recipient(32) + amount0(32) + amount1(32)
-          if (hex.length >= 128) {
+          if (hex.length >= 192) {
             amount0 = BigInt("0x" + hex.slice(64, 128));
             amount1 = BigInt("0x" + hex.slice(128, 192));
           }
         } else {
-          // IncreaseLiquidity(uint128 liquidity, uint256 amount0, uint256 amount1)
-          // DecreaseLiquidity same
-          if (hex.length >= 128) {
+          if (hex.length >= 192) {
             amount0 = BigInt("0x" + hex.slice(64, 128));
             amount1 = BigInt("0x" + hex.slice(128, 192));
           }
@@ -222,7 +239,7 @@ async function getLogsViaBlockscout(params: {
         logs.push({
           blockNumber: BigInt(t.block_number ?? 0),
           transactionHash: t.tx_hash as Hex,
-          logIndex: t.log_index ?? 0,
+          logIndex: 0,
           args: { amount0, amount1 },
         });
       }

@@ -14,6 +14,7 @@ import {
   getPositionEvents,
   type PositionEvent,
 } from "../chain/events";
+import { setV3TransferCache } from "../chain/events";
 import {
   getLivePosition,
   listNpmTokenIds,
@@ -952,6 +953,25 @@ export async function indexAddress(
   // Background: never blocks first response
   void (async () => {
     if (cancelled()) return;
+
+    // Pre-fetch V3 transfer cache for Blockscout fallback
+    try {
+      const npmV3 = "0x73991a25c818bf1f1128deaab1492d45638de0d3";
+      const url = `${ROBINHOOD.explorer}/api/v2/addresses/${address}/token-transfers?type=ERC-721&token=${npmV3}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          items?: Array<{ tx_hash?: string; block_number?: number; total?: { token_id?: string } }>;
+        };
+        const items = (data.items ?? []).map((t) => ({
+          tx_hash: t.tx_hash ?? "",
+          block_number: t.block_number ?? 0,
+          tokenId: t.total?.token_id ?? "0",
+        }));
+        setV3TransferCache(address, items);
+        console.log(`[v3 cache] ${items.length} transfers`);
+      }
+    } catch { /* ignore */ }
 
     // Enrich open V3 with Increase + Collect (claimed fees + cost basis)
     await mapPool(openIds, 2, async (tokenId) => {
