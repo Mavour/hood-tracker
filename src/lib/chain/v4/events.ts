@@ -61,7 +61,7 @@ export async function getV4PositionEvents(
   // 1) Get token transfers (mint + burn) from Blockscout
   try {
     const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${posm}/instances/${tokenId}/transfers`;
-    const res = await withTimeout(fetch(xferUrl), 6_000);
+    const res = await withTimeout(fetch(xferUrl), 10_000);
     if (res.ok) {
       const data = (await res.json()) as {
         items?: Array<{
@@ -74,9 +74,11 @@ export async function getV4PositionEvents(
           timestamp?: string;
         }>;
       };
+      let found = 0;
       for (const t of data.items ?? []) {
         if (!t.tx_hash) continue;
         seenTx.add(t.tx_hash);
+        found++;
         const fromA = (t.from?.hash ?? "").toLowerCase();
         const toA = (t.to?.hash ?? "").toLowerCase();
         let eventType: PositionEvent["eventType"] | null = null;
@@ -97,9 +99,10 @@ export async function getV4PositionEvents(
           amount1Raw: 0n,
         });
       }
+      console.log(`[v4 events] #${tokenId} transfers=${found} txs=${seenTx.size}`);
     }
   } catch (e) {
-    console.warn("[v4 events] transfer API", e instanceof Error ? e.message : e);
+    console.warn("[v4 events] transfer API", tokenId.toString(), e instanceof Error ? e.message : e);
   }
 
   // 2) For each transfer tx, get logs to find ModifyLiquidity events
@@ -110,12 +113,10 @@ export async function getV4PositionEvents(
     for (const log of logs) {
       if (log.topics[0] !== MODIFY_TOPIC) continue;
 
-      // Verify salt matches (last 32 bytes of data)
       const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
       if (hex.length < 256) continue;
       if (hex.slice(192, 256) !== saltHex) continue;
 
-      // Decode liquidityDelta (bytes 128-192)
       const liqDelta = BigInt("0x" + hex.slice(128, 192));
       const isNeg = liqDelta > (1n << 255n);
       const delta = isNeg ? -(liqDelta ^ ((1n << 256n) - 1n)) - 1n : liqDelta;
@@ -124,7 +125,7 @@ export async function getV4PositionEvents(
       events.push({
         tokenId,
         eventType: delta > 0n ? "increase" : "decrease",
-        blockNumber: 0n, // filled below
+        blockNumber: 0n,
         txHash: txHash as Hex,
         logIndex: 0,
         timestamp: 0,
@@ -136,7 +137,6 @@ export async function getV4PositionEvents(
     }
   }
 
-  // Fill timestamps from transfer events (they carry timestamps)
   events.sort((a, b) => {
     if (a.blockNumber !== b.blockNumber)
       return a.blockNumber < b.blockNumber ? -1 : 1;
@@ -144,7 +144,7 @@ export async function getV4PositionEvents(
   });
 
   console.log(
-    `[v4 events] #${tokenId} n=${events.length} (Blockscout)`,
+    `[v4 events] #${tokenId} total=${events.length} (Blockscout)`,
   );
   return events;
 }
