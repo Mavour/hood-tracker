@@ -10,7 +10,7 @@ import {
   parseAbiItem,
   zeroAddress,
 } from "viem";
-import { getNpmAddress } from "@config/contracts";
+import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { getPublicClient, getRpcUrl } from "./client";
 import { humanAmount } from "./math";
 import { getTokenMeta } from "./positions";
@@ -134,11 +134,104 @@ async function getLogsOnce(params: {
     return logs as LogLike[];
   } catch (e) {
     console.warn(
-      "[events] getLogs fail",
+      "[events] getLogs fail — using Blockscout fallback",
       e instanceof Error ? e.message.slice(0, 80) : e,
     );
-    return [];
+    // Fallback to Blockscout API
+    return getLogsViaBlockscout(params);
   }
+}
+
+/** Blockscout-based event fetching — bypasses Alchemy getLogs limits */
+async function getLogsViaBlockscout(params: {
+  event:
+    | typeof increaseEvent
+    | typeof decreaseEvent
+    | typeof collectEvent
+    | typeof transferEvent;
+  tokenId: bigint;
+  timeoutMs: number;
+}): Promise<LogLike[]> {
+  const npm = getNpmAddress();
+  const tokenId = params.tokenId;
+
+  const INCREASE_TOPIC = "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f";
+  const DECREASE_TOPIC = "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4";
+  const COLLECT_TOPIC = "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01";
+
+  const wantedTopic =
+    params.event === increaseEvent ? INCREASE_TOPIC
+    : params.event === decreaseEvent ? DECREASE_TOPIC
+    : params.event === collectEvent ? COLLECT_TOPIC
+    : null;
+
+  if (!wantedTopic) return [];
+
+  const logs: LogLike[] = [];
+
+  try {
+    // Get token transfers from Blockscout
+    const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${npm}/instances/${tokenId}/transfers`;
+    const res = await withTimeout(fetch(xferUrl), params.timeoutMs);
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      items?: Array<{ tx_hash?: string; block_number?: number; log_index?: number }>;
+    };
+
+    for (const t of data.items ?? []) {
+      if (!t.tx_hash) continue;
+
+      // Get tx logs from Blockscout
+      const logUrl = `${ROBINHOOD.explorer}/api/v2/transactions/${t.tx_hash}/logs`;
+      const logRes = await withTimeout(fetch(logUrl), params.timeoutMs);
+      if (!logRes.ok) continue;
+      const logData = (await logRes.json()) as {
+        items?: Array<{
+          data?: string;
+          topics?: string[];
+          address?: { hash?: string };
+        }>;
+      };
+
+      for (const l of logData.items ?? []) {
+        if ((l.topics?.[0] ?? "") !== wantedTopic) continue;
+        if ((l.address?.hash ?? "").toLowerCase() !== npm.toLowerCase()) continue;
+
+        // Decode: bytes 64-96 = amount0, bytes 96-128 = amount1 for Increase/Decrease
+        // For Collect: bytes 0-32 = amount0, bytes 32-64 = amount1
+        const hex = (l.data ?? "0x").startsWith("0x") ? (l.data ?? "0x").slice(2) : (l.data ?? "");
+        let amount0 = 0n;
+        let amount1 = 0n;
+
+        if (params.event === collectEvent) {
+          // Collect(address recipient, uint256 amount0, uint256 amount1)
+          // non-indexed: recipient(32) + amount0(32) + amount1(32)
+          if (hex.length >= 128) {
+            amount0 = BigInt("0x" + hex.slice(64, 128));
+            amount1 = BigInt("0x" + hex.slice(128, 192));
+          }
+        } else {
+          // IncreaseLiquidity(uint128 liquidity, uint256 amount0, uint256 amount1)
+          // DecreaseLiquidity same
+          if (hex.length >= 128) {
+            amount0 = BigInt("0x" + hex.slice(64, 128));
+            amount1 = BigInt("0x" + hex.slice(128, 192));
+          }
+        }
+
+        logs.push({
+          blockNumber: BigInt(t.block_number ?? 0),
+          transactionHash: t.tx_hash as Hex,
+          logIndex: t.log_index ?? 0,
+          args: { amount0, amount1 },
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("[events] blockscout fallback", e instanceof Error ? e.message : e);
+  }
+
+  return logs;
 }
 
 async function attachTimestamps(
