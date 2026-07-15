@@ -9,10 +9,9 @@
  * V4: find ERC20 Transfer events in tx logs
  */
 
-import { type Address, type Hex, zeroAddress } from "viem";
+import { type Address, type Hex } from "viem";
 import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { getPublicClient } from "./client";
-import { transferEvent } from "./abis";
 import { getV4PositionManager } from "./v4/positions";
 import { getDeposit, saveDeposit, type DepositRecord } from "../db";
 
@@ -76,34 +75,6 @@ async function findMintTxHash(
     }
   } catch (e) {
     console.warn("[mint] explorer API", e instanceof Error ? e.message : e);
-  }
-
-  // 2) Fallback: getLogs scan (tokenId and from=zero are indexed, so this is fast)
-  const client = getPublicClient();
-  try {
-    const latest = await client.getBlockNumber().catch(() => 15_000_000n);
-    const from = latest > 8_000_000n ? latest - 8_000_000n : 1n;
-    const logs = await withTimeout(
-      client.getLogs({
-        address: manager,
-        event: transferEvent,
-        args: { from: zeroAddress, tokenId },
-        fromBlock: from,
-        toBlock: "latest" as never,
-      }),
-      10_000,
-    );
-    const log = (
-      logs as Array<{ transactionHash?: Hex; blockNumber?: bigint }>
-    )[0];
-    if (log?.transactionHash) {
-      return {
-        txHash: log.transactionHash,
-        blockNumber: log.blockNumber ?? 0n,
-      };
-    }
-  } catch (e) {
-    console.warn("[mint] findMintTx", tokenId.toString(), e);
   }
   return null;
 }

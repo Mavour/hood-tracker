@@ -22,12 +22,10 @@ import {
   getTokenMeta,
 } from "../chain/positions";
 import { humanAmount } from "../chain/math";
-import { getPublicClient } from "../chain/client";
 import { getMintDeposit } from "../chain/mint";
 import {
   listLiveV4Positions,
   getLiveV4Position,
-  getV4PositionManager,
   type LiveV4Position,
 } from "../chain/v4/positions";
 import { getV4PositionEvents } from "../chain/v4/events";
@@ -47,7 +45,7 @@ import {
   saveEvents,
   type IndexJob,
 } from "../db";
-import { getNpmAddress, ROBINHOOD } from "@config/contracts";
+import { ROBINHOOD } from "@config/contracts";
 import { isIndexCancelled } from "./cancel";
 
 export type PositionView = PositionPnl & {
@@ -253,76 +251,6 @@ type BuildOpts = {
   fetchEvents: boolean;
   historyPending: boolean;
 };
-
-/** Scan Transfer events FROM owner on V3 NPM to find burned/closed NFTs */
-async function listBurnedV3TokenIds(owner: Address): Promise<bigint[]> {
-  const client = getPublicClient();
-  const npm = getNpmAddress();
-  try {
-    const result = await Promise.race([
-      (client as { getLogs: (p: Record<string, unknown>) => Promise<unknown> }).getLogs({
-        address: npm,
-        event: {
-          type: "event",
-          name: "Transfer",
-          inputs: [
-            { name: "from", type: "address", indexed: true },
-            { name: "to", type: "address", indexed: true },
-            { name: "tokenId", type: "uint256", indexed: true },
-          ],
-        },
-        args: { from: owner },
-        fromBlock: 1n,
-        toBlock: "latest" as const,
-      }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000)),
-    ]);
-    const logs = result as Array<{ args: { tokenId?: bigint } }>;
-    const ids = new Set<string>();
-    for (const log of logs) {
-      if (log.args?.tokenId) ids.add(log.args.tokenId.toString());
-    }
-    return [...ids].map((s) => BigInt(s));
-  } catch (e) {
-    console.warn("[burned v3]", e instanceof Error ? e.message : e);
-    return [];
-  }
-}
-
-/** Scan Transfer events FROM owner on V4 PositionManager */
-async function listBurnedV4TokenIds(owner: Address): Promise<bigint[]> {
-  const client = getPublicClient();
-  const posm = getV4PositionManager();
-  try {
-    const result = await Promise.race([
-      (client as { getLogs: (p: Record<string, unknown>) => Promise<unknown> }).getLogs({
-        address: posm,
-        event: {
-          type: "event",
-          name: "Transfer",
-          inputs: [
-            { name: "from", type: "address", indexed: true },
-            { name: "to", type: "address", indexed: true },
-            { name: "tokenId", type: "uint256", indexed: true },
-          ],
-        },
-        args: { from: owner },
-        fromBlock: 1n,
-        toBlock: "latest" as const,
-      }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000)),
-    ]);
-    const logs = result as Array<{ args: { tokenId?: bigint } }>;
-    const ids = new Set<string>();
-    for (const log of logs) {
-      if (log.args?.tokenId) ids.add(log.args.tokenId.toString());
-    }
-    return [...ids].map((s) => BigInt(s));
-  } catch (e) {
-    console.warn("[burned v4]", e instanceof Error ? e.message : e);
-    return [];
-  }
-}
 
 async function buildOnePosition(
   tokenId: bigint,
@@ -1025,23 +953,6 @@ export async function indexAddress(
   void (async () => {
     if (cancelled()) return;
 
-    // Scan for burned (closed) V3+V4 NFTs — heavy, kept in background
-    const burnedV3 = await listBurnedV3TokenIds(owner);
-    if (burnedV3.length) {
-      console.log(`[index] bg found ${burnedV3.length} burned V3 NFTs`);
-      for (const id of burnedV3) {
-        if (!heldIds.some((h) => h === id)) heldIds.push(id);
-        if (!closedHeldIds.some((h) => h === id)) {
-          const raw = await readPosition(id).catch(() => null);
-          if (raw && raw.liquidity === 0n) closedHeldIds.push(id);
-        }
-      }
-    }
-    const burnedV4 = await listBurnedV4TokenIds(owner);
-    if (burnedV4.length) {
-      console.log(`[index] bg found ${burnedV4.length} burned V4 NFTs`);
-    }
-
     // Enrich open V3 with Increase + Collect (claimed fees + cost basis)
     await mapPool(openIds, 2, async (tokenId) => {
       if (cancelled()) return;
@@ -1065,7 +976,7 @@ export async function indexAddress(
 
     // V4: retry in background if not found during first paint
     // Also collect closed V4 positions for backfill
-    const v4ClosedIds: bigint[] = [...burnedV4]; // start with historically burned
+    const v4ClosedIds: bigint[] = [];
     const hasV4 = openViews.some((v) => v.protocol === "v4");
     if (!hasV4) {
       try {
