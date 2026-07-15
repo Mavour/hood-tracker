@@ -21,15 +21,18 @@ import {
   resolvePool,
   getTokenMeta,
 } from "../chain/positions";
+import { humanAmount } from "../chain/math";
+import { getMintDeposit } from "../chain/mint";
 import {
   listLiveV4Positions,
   type LiveV4Position,
 } from "../chain/v4/positions";
 import { getV4PositionEvents } from "../chain/v4/events";
-import { getTokenPriceLive, valueDual } from "../pricing";
+import { getTokenPriceLive, valueDual, getPoolPriceAtBlock } from "../pricing";
 import {
   computePositionPnl,
   aggregatePortfolio,
+  type MintDeposit,
   type PricedEvent,
   type PositionPnl,
 } from "../pnl/compute";
@@ -109,6 +112,58 @@ async function livePricesForPair(token0: Address, token1: Address) {
   };
 }
 
+/**
+ * Price a position's events at EACH event's block (historical, block-matched),
+ * not with a single live snapshot. Groups by block to minimize RPC calls and
+ * reuses the block-price cache inside getPoolPriceAtBlock.
+ *
+ * For V4 (no poolAddress) we fall back to live prices — V4 has no V3-style pool
+ * to query at block; this is a known degraded path.
+ */
+async function priceEventsAtBlocks(
+  events: PositionEvent[],
+  token0: Address,
+  token1: Address,
+  poolAddress: Address | null,
+  decimals0: number,
+  decimals1: number,
+): Promise<PricedEvent[]> {
+  if (!poolAddress || events.length === 0) {
+    const lp = await livePricesForPair(token0, token1);
+    return toPriced(events, lp);
+  }
+
+  const byBlock = new Map<number, PositionEvent[]>();
+  for (const e of events) {
+    const b = Number(e.blockNumber);
+    if (!byBlock.has(b)) byBlock.set(b, []);
+    byBlock.get(b)!.push(e);
+  }
+
+  const batches = [...byBlock.entries()];
+  const results = await mapPool(batches, 4, async ([b, evs]) => {
+    const prices = await getPoolPriceAtBlock(
+      poolAddress,
+      token0,
+      token1,
+      decimals0,
+      decimals1,
+      BigInt(b),
+    ).catch(() => livePricesForPair(token0, token1));
+    return evs.map((e) => ({
+      eventType: e.eventType,
+      timestamp: e.timestamp,
+      amount0: e.amount0,
+      amount1: e.amount1,
+      ...prices,
+      txHash: e.txHash,
+      blockNumber: b,
+    }));
+  });
+
+  return results.flat();
+}
+
 function toPriced(
   events: PositionEvent[],
   prices: Awaited<ReturnType<typeof livePricesForPair>>,
@@ -122,6 +177,54 @@ function toPriced(
     txHash: e.txHash,
     blockNumber: Number(e.blockNumber),
   }));
+}
+
+/**
+ * Resolve the canonical deposit from the on-chain MINT transaction and price it
+ * at the mint block. Returns null when it cannot be resolved (caller keeps
+ * using IncreaseLiquidity events).
+ */
+async function resolveMintDeposit(
+  protocol: "v3" | "v4",
+  tokenId: bigint,
+  token0: Address,
+  token1: Address,
+  fee: number,
+  poolAddress: Address | null,
+  decimals0: number,
+  decimals1: number,
+): Promise<MintDeposit | null> {
+  const mint = await getMintDeposit({
+    protocol,
+    tokenId,
+    token0,
+    token1,
+    fee,
+    decimals0,
+    decimals1,
+  }).catch(() => null);
+  if (!mint || (mint.amount0 === 0n && mint.amount1 === 0n)) return null;
+
+  const prices = poolAddress
+    ? await getPoolPriceAtBlock(
+        poolAddress,
+        token0,
+        token1,
+        decimals0,
+        decimals1,
+        mint.blockNumber,
+      ).catch(() => livePricesForPair(token0, token1))
+    : await livePricesForPair(token0, token1);
+
+  return {
+    amount0: humanAmount(mint.amount0, decimals0),
+    amount1: humanAmount(mint.amount1, decimals1),
+    price0Usd: prices.price0Usd,
+    price1Usd: prices.price1Usd,
+    price0Eth: prices.price0Eth,
+    price1Eth: prices.price1Eth,
+    blockNumber: Number(mint.blockNumber),
+  };
 }
 
 async function mapPool<T, R>(
@@ -194,11 +297,44 @@ async function buildOnePosition(
     }
   }
 
-  const prices = await livePricesForPair(token0, token1);
-  const priced = toPriced(events, prices);
+  const priced = await priceEventsAtBlocks(
+    events,
+    token0,
+    token1,
+    poolAddress,
+    meta0.decimals,
+    meta1.decimals,
+  );
 
-  // NEVER synthesize deposit = current amounts (that made Fee PnL = all "profit").
-  // Real cost basis must come from IncreaseLiquidity events only.
+  // Canonical deposit from the on-chain MINT transaction (authoritative cost
+  // basis). Done during enrichment/backfill (when events are fetched) so the
+  // first paint stays fast; falls back to IncreaseLiquidity events otherwise.
+  let mintDeposit = opts.fetchEvents
+    ? await resolveMintDeposit(
+        "v3",
+        tokenId,
+        token0,
+        token1,
+        fee,
+        poolAddress,
+        meta0.decimals,
+        meta1.decimals,
+      ).catch(() => null)
+    : null;
+
+  // V3 fallback: if on-chain resolution fails for an open position, use current live amounts
+  if (!mintDeposit && isOpen && livePos && (livePos.amount0Human > 0 || livePos.amount1Human > 0)) {
+    const estPrices = await livePricesForPair(token0, token1);
+    mintDeposit = {
+      amount0: livePos.amount0Human,
+      amount1: livePos.amount1Human,
+      price0Usd: estPrices.price0Usd,
+      price1Usd: estPrices.price1Usd,
+      price0Eth: estPrices.price0Eth,
+      price1Eth: estPrices.price1Eth,
+      blockNumber: 0,
+    };
+  }
 
   let currentValueUsd = 0;
   let currentValueEth = 0;
@@ -227,7 +363,7 @@ async function buildOnePosition(
   const hasIncrease = priced.some(
     (e) => e.eventType === "increase" && (e.amount0 > 0 || e.amount1 > 0),
   );
-  const costBasisEstimated = !hasIncrease;
+  const costBasisEstimated = !hasIncrease && !mintDeposit;
 
   // Closed with no events yet → skip noise rows in fast phase
   if (!isOpen && priced.length === 0 && opts.historyPending) {
@@ -291,6 +427,7 @@ async function buildOnePosition(
     unclaimedFeesUsd,
     unclaimedFeesEth,
     isOpen,
+    mintDeposit,
   });
   if (!isOpen && pnl.closedAt == null && closedTs) {
     (pnl as { closedAt: number | null }).closedAt = closedTs;
@@ -404,6 +541,35 @@ async function buildOneV4Position(
   const prices = await livePricesForPair(vp.token0, vp.token1);
   const priced = toPriced(events, prices);
 
+  // V4 mint deposit: resolve during enrichment/events phase, skip during fast first paint
+  let mintDeposit: MintDeposit | null = null;
+  if (fetchEvents) {
+    mintDeposit = await resolveMintDeposit(
+      "v4",
+      vp.tokenId,
+      vp.token0,
+      vp.token1,
+      vp.fee,
+      null,
+      vp.decimals0,
+      vp.decimals1,
+    ).catch(() => null);
+  }
+
+  // V4 fallback: if on-chain resolution fails for an open position, use current live amounts
+  if (!mintDeposit && isOpen) {
+    const estPrices = await livePricesForPair(vp.token0, vp.token1);
+    mintDeposit = {
+      amount0: vp.amount0Human,
+      amount1: vp.amount1Human,
+      price0Usd: estPrices.price0Usd,
+      price1Usd: estPrices.price1Usd,
+      price0Eth: estPrices.price0Eth,
+      price1Eth: estPrices.price1Eth,
+      blockNumber: 0,
+    };
+  }
+
   let currentValueUsd = 0;
   let currentValueEth = 0;
   let unclaimedFeesUsd = 0;
@@ -440,6 +606,7 @@ async function buildOneV4Position(
     unclaimedFeesUsd,
     unclaimedFeesEth,
     isOpen,
+    mintDeposit,
   });
 
   const view: PositionView = {
@@ -459,7 +626,7 @@ async function buildOneV4Position(
     amount1Human: vp.amount1Human,
     liquidity: vp.liquidity.toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.v4PositionManager}/instance/${vp.tokenId}`,
-    costBasisEstimated: !hasIncrease || Boolean(pnl.costBasisMissing),
+    costBasisEstimated: !mintDeposit && (!hasIncrease || Boolean(pnl.costBasisMissing)),
     hasCustomHook: vp.hasCustomHook,
     realizedPnlUsd: isOpen ? 0 : pnl.netPnlUsd,
     unrealizedPnlUsd: isOpen ? pnl.netPnlUsd : 0,
@@ -669,7 +836,7 @@ export async function indexAddress(
     else closedHeldIds.push(tokenId);
   });
 
-  // 3) Full live mark ONLY for open (typically 1–5) — no fee growth, no events
+  // 3) Full live mark for open (typically 1–5) — fee growth ON, events in bg
   await checkpoint(
     55,
     openIds.length
@@ -681,7 +848,6 @@ export async function indexAddress(
     string,
     NonNullable<Awaited<ReturnType<typeof getLivePosition>>>
   >();
-  process.env.SKIP_FEE_GROWTH = "1";
   await mapPool(openIds, 6, async (tokenId) => {
     if (!ok()) return;
     const p = await getLivePosition(tokenId, owner).catch(() => null);
@@ -752,9 +918,8 @@ export async function indexAddress(
   // Background: never blocks first response
   void (async () => {
     if (cancelled()) return;
-    process.env.SKIP_FEE_GROWTH = "0";
 
-    // Enrich open with Increase + Collect (claimed fees + cost basis)
+    // Enrich open V3 with Increase + Collect (claimed fees + cost basis)
     await mapPool(openIds, 2, async (tokenId) => {
       if (cancelled()) return;
       const live2 = await getLivePosition(tokenId, owner).catch(() => null);
@@ -772,6 +937,32 @@ export async function indexAddress(
       if (pIdx >= 0) openPnls[pIdx] = built.pnl;
       openEvents.set(`v3:${tokenId}`, built.priced);
     });
+
+    if (cancelled()) return;
+
+    // V4: retry in background if not found during first paint
+    const hasV4 = openViews.some((v) => v.protocol === "v4");
+    if (!hasV4) {
+      try {
+        const v4Live = await listLiveV4Positions(owner);
+        for (const vp of v4Live) {
+          if (cancelled()) return;
+          if (vp.liquidity === 0n) continue;
+          const built = await buildOneV4Position(vp, latest, true).catch(
+            () => null,
+          );
+          if (!built) continue;
+          openViews.push(built.view);
+          openPnls.push(built.pnl);
+          openEvents.set(`v4:${vp.tokenId}`, built.priced);
+        }
+        if (v4Live.length) {
+          console.log(`[index] bg V4 found ${v4Live.length} positions`);
+        }
+      } catch (e) {
+        console.warn("[index] bg V4", e);
+      }
+    }
 
     if (cancelled()) return;
     publishCache(address, [...openViews], [...openPnls], openEvents, "fast");

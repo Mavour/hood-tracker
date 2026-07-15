@@ -12,6 +12,7 @@ export type MemStore = {
   daily: Map<string, Record<string, unknown>>;
   jobs: Map<string, Record<string, unknown>>;
   pnlCache: Map<string, Record<string, unknown>>;
+  deposits: Map<string, Record<string, unknown>>;
   running: Map<string, Promise<unknown>>;
 };
 
@@ -67,6 +68,7 @@ export function getMem(): MemStore {
       daily: new Map(),
       jobs: loadMapFile(JOBS_FILE),
       pnlCache: loadMapFile(CACHE_FILE),
+      deposits: new Map(),
       running: new Map(),
     };
   }

@@ -45,7 +45,7 @@ export function LiveOpenPositions({
   onTotals?: (t: LiveTotals | null) => void;
 }) {
   const [rows, setRows] = useState<LiveRow[]>([]);
-  const [totals, setTotals] = useState<LiveTotals | null>(null);
+  const [, setTotals] = useState<LiveTotals | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ago, setAgo] = useState(0);

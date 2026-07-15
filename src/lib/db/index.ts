@@ -427,6 +427,81 @@ export async function getEventsForToken(tokenId: string) {
   return rows;
 }
 
+// ── Deposits (permanent, canonical cost-basis cache) ──────────────
+
+export type DepositRecord = {
+  tokenId: string;
+  protocol: "v3" | "v4";
+  amount0: number;
+  amount1: number;
+  /** raw base-unit strings (lossless) — prefer these over amount0/amount1 */
+  amount0Raw?: string;
+  amount1Raw?: string;
+  blockNumber: number;
+  txHash: string;
+  source: "mint" | "increase" | "estimate";
+};
+
+export async function getDeposit(
+  tokenId: string,
+): Promise<DepositRecord | null> {
+  await initDb();
+  if (useMemory || !getPool()) {
+    const d = mem().deposits.get(tokenId);
+    return d ? (d as unknown as DepositRecord) : null;
+  }
+  const { rows } = await query<{
+    token_id: string;
+    protocol: string;
+    amount0: string;
+    amount1: string;
+    block_number: string;
+    tx_hash: string;
+    source: string;
+  }>(`SELECT * FROM deposits WHERE token_id = $1`, [tokenId]);
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return {
+    tokenId: r.token_id,
+    protocol: (r.protocol as "v3" | "v4") ?? "v3",
+    amount0: Number(r.amount0),
+    amount1: Number(r.amount1),
+    amount0Raw: r.amount0,
+    amount1Raw: r.amount1,
+    blockNumber: Number(r.block_number),
+    txHash: r.tx_hash,
+    source: (r.source as DepositRecord["source"]) ?? "mint",
+  };
+}
+
+export async function saveDeposit(rec: DepositRecord): Promise<void> {
+  await initDb();
+  if (useMemory || !getPool()) {
+    mem().deposits.set(rec.tokenId, { ...rec });
+    return;
+  }
+  await query(
+    `INSERT INTO deposits (token_id, protocol, amount0, amount1, block_number, tx_hash, source, resolved_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+     ON CONFLICT (token_id) DO UPDATE SET
+       amount0 = EXCLUDED.amount0,
+       amount1 = EXCLUDED.amount1,
+       block_number = EXCLUDED.block_number,
+       tx_hash = EXCLUDED.tx_hash,
+       source = EXCLUDED.source,
+       resolved_at = NOW()`,
+    [
+      rec.tokenId,
+      rec.protocol,
+      rec.amount0Raw ?? rec.amount0.toString(),
+      rec.amount1Raw ?? rec.amount1.toString(),
+      rec.blockNumber,
+      rec.txHash,
+      rec.source,
+    ],
+  );
+}
+
 export async function getPositionsForOwner(address: string) {
   await initDb();
   const addr = address.toLowerCase();

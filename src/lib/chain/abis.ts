@@ -122,6 +122,44 @@ export const poolAbi = [
   },
 ] as const;
 
+export const poolMintEvent = [
+  {
+    type: "event",
+    name: "Mint",
+    inputs: [
+      { name: "sender", type: "address", indexed: true },
+      { name: "owner", type: "address", indexed: true },
+      { name: "tickLower", type: "int24", indexed: true },
+      { name: "tickUpper", type: "int24", indexed: false },
+      { name: "amount", type: "uint128", indexed: false },
+      { name: "amount0", type: "uint256", indexed: false },
+      { name: "amount1", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+export const erc20TransferEvent = [
+  {
+    type: "event",
+    name: "Transfer",
+    inputs: [
+      { name: "from", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: true },
+      { name: "value", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+export const transferEvent = {
+  type: "event",
+  name: "Transfer",
+  inputs: [
+    { name: "from", type: "address", indexed: true },
+    { name: "to", type: "address", indexed: true },
+    { name: "tokenId", type: "uint256", indexed: true },
+  ],
+} as const;
+
 export const npmAbi = [
   {
     type: "function",

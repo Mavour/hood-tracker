@@ -19,6 +19,24 @@ export type DualPrice = {
 const liveCache = new Map<string, { price: DualPrice; at: number }>();
 const LIVE_TTL = 20_000;
 
+/**
+ * Block-scoped price cache so we don't re-query the same (pool, block) twice
+ * while pricing a position's event history.
+ */
+const blockPriceCache = new Map<
+  string,
+  {
+    price: {
+      price0Usd: number;
+      price1Usd: number;
+      price0Eth: number;
+      price1Eth: number;
+    };
+    at: number;
+  }
+>();
+const BLOCK_PRICE_TTL = 120_000;
+
 function isStable(addr: string): boolean {
   const a = addr.toLowerCase();
   return a === ROBINHOOD.usdg.toLowerCase();
@@ -103,6 +121,47 @@ async function ethUsdLive(): Promise<number> {
   const ds = await fetchDexScreenerUsd(ROBINHOOD.wrapped);
   if (ds) return ds;
   return 3000; // last-resort stub so UI still renders
+}
+
+/**
+ * Historical ETH/USD price anchored to the WETH/USDG pool AT a specific block
+ * (archive node). Falls back to the live ETH/USD only when the pool cannot be
+ * read at that block (no archive access) — and warns, since that is a degraded
+ * path per the "no live fallback for historical" rule.
+ */
+async function ethUsdAtBlock(blockNumber: bigint): Promise<number> {
+  try {
+    const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
+    if (pool) {
+      const client = getPublicClient();
+      const slot0 = await client.readContract({
+        address: pool,
+        abi: poolAbi,
+        functionName: "slot0",
+        blockNumber,
+      });
+      const meta0 = await getTokenMeta(ROBINHOOD.wrapped);
+      const meta1 = await getTokenMeta(ROBINHOOD.usdg);
+      const t0 =
+        ROBINHOOD.wrapped.toLowerCase() < ROBINHOOD.usdg.toLowerCase()
+          ? ROBINHOOD.wrapped
+          : ROBINHOOD.usdg;
+      const sqrt = slot0[0] as bigint;
+      if (t0.toLowerCase() === ROBINHOOD.wrapped.toLowerCase()) {
+        const p = price0In1FromSqrt(sqrt, meta0.decimals, meta1.decimals);
+        if (p > 0) return p;
+      } else {
+        const p = price0In1FromSqrt(sqrt, meta1.decimals, meta0.decimals);
+        if (p > 0) return 1 / p;
+      }
+    }
+  } catch {
+    /* fall through to live */
+  }
+  console.warn(
+    `[pricing] ethUsdAtBlock(${blockNumber}) unavailable — using live ETH/USD fallback`,
+  );
+  return ethUsdLive();
 }
 
 /**
@@ -239,8 +298,13 @@ export async function valueDual(
 }
 
 /**
- * Approximate historical price: use live prices as fallback when historical
- * pool eth_call at block is unavailable. Callers should prefer getPoolPriceAtBlock.
+ * Historical price for a token pair AT a specific block.
+ *
+ * Priority (per Uniswap docs / accurate PnL):
+ *   1) Pool slot0 via eth_call with `blockNumber` (exact, block-matched)
+ *   2) Bridge ETH/USD via the WETH/USDG pool AT the same block
+ *   — live prices are used ONLY as a last-resort when the archive node cannot
+ *     serve the historical slot0 (and a warning is emitted).
  */
 export async function getPoolPriceAtBlock(
   poolAddress: Address,
@@ -250,6 +314,10 @@ export async function getPoolPriceAtBlock(
   decimals1: number,
   blockNumber: bigint,
 ): Promise<{ price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number }> {
+  const cacheKey = `${poolAddress.toLowerCase()}:${blockNumber.toString()}`;
+  const cached = blockPriceCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < BLOCK_PRICE_TTL) return cached.price;
+
   try {
     const client = getPublicClient();
     const slot0 = await client.readContract({
@@ -261,47 +329,58 @@ export async function getPoolPriceAtBlock(
     const sqrt = slot0[0] as bigint;
     const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
 
-    // Anchor to WETH or stable
+    // Anchor to WETH or stable using the BLOCK-matched ETH/USD bridge
     if (isWeth(token0)) {
-      const ethUsd = await ethUsdLive(); // approx; historical eth/usd ideal via Chainlink
-      return {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
         price0Usd: ethUsd,
         price0Eth: 1,
         price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
         price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
       };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
     }
     if (isWeth(token1)) {
-      const ethUsd = await ethUsdLive();
-      return {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
         price0Usd: p0in1 * ethUsd,
         price0Eth: p0in1,
         price1Usd: ethUsd,
         price1Eth: 1,
       };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
     }
     if (isStable(token0)) {
-      const ethUsd = await ethUsdLive();
-      return {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
         price0Usd: 1,
         price0Eth: ethUsd > 0 ? 1 / ethUsd : 0,
         price1Usd: p0in1 > 0 ? 1 / p0in1 : 0,
         price1Eth: ethUsd > 0 && p0in1 > 0 ? 1 / p0in1 / ethUsd : 0,
       };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
     }
     if (isStable(token1)) {
-      const ethUsd = await ethUsdLive();
-      return {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
         price0Usd: p0in1,
         price0Eth: ethUsd > 0 ? p0in1 / ethUsd : 0,
         price1Usd: 1,
         price1Eth: ethUsd > 0 ? 1 / ethUsd : 0,
       };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
     }
   } catch {
-    /* fall through to live */
+    console.warn(
+      `[pricing] getPoolPriceAtBlock(${poolAddress}, ${blockNumber}) failed — live fallback`,
+    );
   }
 
+  // Absolute last resort: live prices (degraded historical accuracy)
   const [p0, p1] = await Promise.all([
     getTokenPriceLive(token0),
     getTokenPriceLive(token1),
@@ -312,4 +391,45 @@ export async function getPoolPriceAtBlock(
     price0Eth: p0.eth,
     price1Eth: p1.eth,
   };
+}
+
+/**
+ * Single-token historical price at a block, matched to the event timestamp.
+ * Resolves via a pool vs WETH/USDG at `blockNumber` — never silently uses live
+ * unless no pool path exists at that block.
+ */
+export async function getHistoricalPrice(
+  token: Address,
+  blockNumber: bigint,
+): Promise<DualPrice> {
+  const key = token.toLowerCase();
+  if (isStable(key)) {
+    const ethUsd = await ethUsdAtBlock(blockNumber);
+    return { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0, source: "block-stable" };
+  }
+  if (isWeth(key)) {
+    const ethUsd = await ethUsdAtBlock(blockNumber);
+    return { usd: ethUsd, eth: 1, source: "block-weth" };
+  }
+  for (const quote of [ROBINHOOD.wrapped, ROBINHOOD.usdg]) {
+    const pool = await resolvePool(token, quote, 500);
+    if (!pool) continue;
+    const metaT = await getTokenMeta(token);
+    const metaQ = await getTokenMeta(quote);
+    const t0IsToken = token.toLowerCase() < quote.toLowerCase();
+    const pair = await getPoolPriceAtBlock(
+      pool,
+      t0IsToken ? token : quote,
+      t0IsToken ? quote : token,
+      metaT.decimals,
+      metaQ.decimals,
+      blockNumber,
+    );
+    const inEth = t0IsToken ? pair.price0Eth : pair.price1Eth;
+    const inUsd = t0IsToken ? pair.price0Usd : pair.price1Usd;
+    if (inEth > 0 || inUsd > 0) {
+      return { usd: inUsd, eth: inEth, source: `block-pool-${quote === ROBINHOOD.wrapped ? "weth" : "usdg"}` };
+    }
+  }
+  return { usd: 0, eth: 0, source: "unavailable" };
 }

@@ -284,25 +284,23 @@ export async function getLivePosition(
       amount0 = amounts.amount0;
       amount1 = amounts.amount1;
 
-      // Fee growth math = 4 extra pool RPCs — skip on fast path (tokensOwed only)
-      if (process.env.SKIP_FEE_GROWTH !== "1") {
-        try {
-          const live = await computeV3UnclaimedFees({
-            poolAddress,
-            tickLower: raw.tickLower,
-            tickUpper: raw.tickUpper,
-            liquidity: raw.liquidity,
-            feeGrowthInside0LastX128: raw.feeGrowthInside0LastX128,
-            feeGrowthInside1LastX128: raw.feeGrowthInside1LastX128,
-            tokensOwed0: raw.tokensOwed0,
-            tokensOwed1: raw.tokensOwed1,
-            currentTick,
-          });
-          unclaimed0 = live.fees0;
-          unclaimed1 = live.fees1;
-        } catch {
-          /* keep tokensOwed */
-        }
+      // Fee growth math (full algorithm) — always on for accurate unclaimed fees
+      try {
+        const live = await computeV3UnclaimedFees({
+          poolAddress,
+          tickLower: raw.tickLower,
+          tickUpper: raw.tickUpper,
+          liquidity: raw.liquidity,
+          feeGrowthInside0LastX128: raw.feeGrowthInside0LastX128,
+          feeGrowthInside1LastX128: raw.feeGrowthInside1LastX128,
+          tokensOwed0: raw.tokensOwed0,
+          tokensOwed1: raw.tokensOwed1,
+          currentTick,
+        });
+        unclaimed0 = live.fees0;
+        unclaimed1 = live.fees1;
+      } catch {
+        /* keep tokensOwed */
       }
     } catch (e) {
       console.warn("[getLivePosition]", tokenId.toString(), e);

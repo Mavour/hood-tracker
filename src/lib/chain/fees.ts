@@ -9,6 +9,7 @@ import { poolAbi } from "./abis";
 import { getPublicClient } from "./client";
 
 const Q128 = 1n << 128n;
+const UINT256_MOD = 2n ** 256n;
 
 export function feesFromGrowth(
   feeGrowthInsideX128: bigint,
@@ -35,17 +36,17 @@ export function feeGrowthInside(
   if (tickCurrent >= tickLower) {
     feeGrowthBelow = feeGrowthOutsideLowerX128;
   } else {
-    feeGrowthBelow = feeGrowthGlobalX128 - feeGrowthOutsideLowerX128;
+    feeGrowthBelow = ((feeGrowthGlobalX128 - feeGrowthOutsideLowerX128 + UINT256_MOD) % UINT256_MOD);
   }
 
   let feeGrowthAbove: bigint;
   if (tickCurrent < tickUpper) {
     feeGrowthAbove = feeGrowthOutsideUpperX128;
   } else {
-    feeGrowthAbove = feeGrowthGlobalX128 - feeGrowthOutsideUpperX128;
+    feeGrowthAbove = ((feeGrowthGlobalX128 - feeGrowthOutsideUpperX128 + UINT256_MOD) % UINT256_MOD);
   }
 
-  return feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove;
+  return ((feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove + UINT256_MOD * 2n) % UINT256_MOD);
 }
 
 export async function computeV3UnclaimedFees(params: {

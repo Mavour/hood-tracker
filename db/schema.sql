@@ -21,6 +21,19 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE INDEX IF NOT EXISTS idx_positions_owner ON positions (owner_address);
 
+CREATE TABLE IF NOT EXISTS deposits (
+  token_id      BIGINT PRIMARY KEY,
+  protocol      TEXT NOT NULL DEFAULT 'v3', -- v3 | v4
+  amount0       TEXT NOT NULL DEFAULT '0', -- raw token base units (lossless)
+  amount1       TEXT NOT NULL DEFAULT '0',
+  block_number  BIGINT NOT NULL,
+  tx_hash       TEXT NOT NULL,
+  source        TEXT NOT NULL DEFAULT 'mint', -- mint | increase | estimate
+  resolved_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deposits_token ON deposits (token_id);
+
 CREATE TABLE IF NOT EXISTS position_events (
   id           BIGSERIAL PRIMARY KEY,
   token_id     BIGINT NOT NULL REFERENCES positions (token_id) ON DELETE CASCADE,

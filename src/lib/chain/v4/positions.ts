@@ -376,17 +376,15 @@ export async function getLiveV4Position(
       amount0 = am.amount0;
       amount1 = am.amount1;
 
-      if (process.env.SKIP_FEE_GROWTH !== "1") {
-        const fees = await computeV4UnclaimedFees({
-          poolId,
-          tokenId,
-          tickLower,
-          tickUpper,
-          liquidity,
-        });
-        unclaimed0 = fees.fees0;
-        unclaimed1 = fees.fees1;
-      }
+      const fees = await computeV4UnclaimedFees({
+        poolId,
+        tokenId,
+        tickLower,
+        tickUpper,
+        liquidity,
+      });
+      unclaimed0 = fees.fees0;
+      unclaimed1 = fees.fees1;
     } catch (e) {
       console.warn("[v4 live]", tokenId.toString(), e);
     }

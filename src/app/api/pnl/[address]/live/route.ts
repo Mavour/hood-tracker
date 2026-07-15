@@ -36,58 +36,62 @@ export async function GET(
 
   const liveRows = await Promise.all(
     open.map(async (p) => {
-      const meta: CachedPositionMeta = {
-        tokenId: String(p.tokenId),
-        token0: String(p.token0),
-        token1: String(p.token1),
-        tickLower: Number(p.tickLower),
-        tickUpper: Number(p.tickUpper),
-        liquidity: String(p.liquidity ?? "0"),
-        poolAddress: (p.poolAddress as string) ?? null,
-        decimals0: 18,
-        decimals1: 18,
-        symbol0: String(p.symbol0 ?? "T0"),
-        symbol1: String(p.symbol1 ?? "T1"),
-        fee: Number(p.fee ?? 0),
-        depositUsd: Number(p.depositUsd ?? 0),
-        depositEth: Number(p.depositEth ?? 0),
-        feesCollectedUsd: Number(p.feesCollectedUsd ?? 0),
-        feesCollectedEth: Number(p.feesCollectedEth ?? 0),
-        withdrawnUsd: Number(p.withdrawnUsd ?? 0),
-        withdrawnEth: Number(p.withdrawnEth ?? 0),
-      };
+      try {
+        const meta: CachedPositionMeta = {
+          tokenId: String(p.tokenId),
+          token0: String(p.token0),
+          token1: String(p.token1),
+          tickLower: Number(p.tickLower),
+          tickUpper: Number(p.tickUpper),
+          liquidity: String(p.liquidity ?? "0"),
+          poolAddress: (p.poolAddress as string) ?? null,
+          decimals0: Number(p.decimals0 ?? 18),
+          decimals1: Number(p.decimals1 ?? 18),
+          symbol0: String(p.symbol0 ?? "T0"),
+          symbol1: String(p.symbol1 ?? "T1"),
+          fee: Number(p.fee ?? 0),
+          depositUsd: Number(p.depositUsd ?? 0),
+          depositEth: Number(p.depositEth ?? 0),
+          feesCollectedUsd: Number(p.feesCollectedUsd ?? 0),
+          feesCollectedEth: Number(p.feesCollectedEth ?? 0),
+          withdrawnUsd: Number(p.withdrawnUsd ?? 0),
+          withdrawnEth: Number(p.withdrawnEth ?? 0),
+          protocol: (p.protocol as "v3" | "v4") ?? "v3",
+          poolId: (p.poolId as string) ?? null,
+        };
 
-      // Prefer decimals from symbols heuristics if missing
-      if (meta.symbol0 === "USDG" || meta.symbol1 === "USDG") {
         if (meta.symbol0 === "USDG") meta.decimals0 = 6;
         if (meta.symbol1 === "USDG") meta.decimals1 = 6;
+
+        const live = await getLiveValue(meta);
+        if (!live) return null;
+
+        return {
+          tokenId: meta.tokenId,
+          pool: `${meta.symbol0}/${meta.symbol1} ${feeTierLabel(meta.fee)}`,
+          depositValueUsd: meta.depositUsd,
+          depositValueEth: meta.depositEth,
+          currentValueUsd: live.currentValueUsd + live.feeUnclaimedUsd,
+          currentValueEth: live.currentValueEth + live.feeUnclaimedEth,
+          principalUsd: live.principalUsd,
+          principalEth: live.principalEth,
+          unrealizedPnlUsd: live.unrealizedPnlUsd,
+          unrealizedPnlEth: live.unrealizedPnlEth,
+          feeUnclaimedUsd: live.feeUnclaimedUsd,
+          feeUnclaimedEth: live.feeUnclaimedEth,
+          feesCollectedUsd: meta.feesCollectedUsd,
+          feesCollectedEth: meta.feesCollectedEth,
+          inRange: live.inRange,
+          amount0Human: live.amount0Human,
+          amount1Human: live.amount1Human,
+          lastUpdated: live.lastUpdated,
+          costBasisEstimated: Boolean(p.costBasisEstimated) || Boolean(live.depositMissing),
+          protocol: meta.protocol,
+        };
+      } catch (e) {
+        console.warn("[live] position error", p.tokenId, e);
+        return null;
       }
-
-      const live = await getLiveValue(meta);
-      if (!live) return null;
-
-      return {
-        tokenId: meta.tokenId,
-        pool: `${meta.symbol0}/${meta.symbol1} ${feeTierLabel(meta.fee)}`,
-        depositValueUsd: meta.depositUsd,
-        depositValueEth: meta.depositEth,
-        currentValueUsd: live.currentValueUsd + live.feeUnclaimedUsd,
-        currentValueEth: live.currentValueEth + live.feeUnclaimedEth,
-        principalUsd: live.principalUsd,
-        principalEth: live.principalEth,
-        unrealizedPnlUsd: live.unrealizedPnlUsd,
-        unrealizedPnlEth: live.unrealizedPnlEth,
-        feeUnclaimedUsd: live.feeUnclaimedUsd,
-        feeUnclaimedEth: live.feeUnclaimedEth,
-        feesCollectedUsd: meta.feesCollectedUsd,
-        feesCollectedEth: meta.feesCollectedEth,
-        inRange: live.inRange,
-        amount0Human: live.amount0Human,
-        amount1Human: live.amount1Human,
-        lastUpdated: live.lastUpdated,
-        costBasisEstimated: Boolean(p.costBasisEstimated),
-        protocol: (p.protocol as string) ?? "v3",
-      };
     }),
   );
 

@@ -47,6 +47,18 @@ export type PositionPnl = {
   costBasisMissing?: boolean;
   /** number of increase events used for cost basis */
   increaseEventCount?: number;
+  /** where the deposit came from */
+  costBasisSource?: "mint" | "events" | "missing";
+};
+
+export type MintDeposit = {
+  amount0: number;
+  amount1: number;
+  price0Usd: number;
+  price1Usd: number;
+  price0Eth: number;
+  price1Eth: number;
+  blockNumber?: number;
 };
 
 export type DailyPnl = {
@@ -93,6 +105,13 @@ export function computePositionPnl(params: {
   unclaimedFeesUsd?: number;
   unclaimedFeesEth?: number;
   isOpen?: boolean;
+  /**
+   * Canonical deposit resolved from the on-chain MINT transaction. When
+   * present it is the authoritative cost basis; IncreaseLiquidity events at or
+   * before the mint block are excluded to avoid double-counting (the mint IS
+   * the first increase). Subsequent increases still add to the deposit.
+   */
+  mintDeposit?: MintDeposit | null;
 }): PositionPnl {
   const {
     tokenId,
@@ -102,6 +121,7 @@ export function computePositionPnl(params: {
     unclaimedFeesUsd = 0,
     unclaimedFeesEth = 0,
     isOpen = false,
+    mintDeposit = null,
   } = params;
 
   let depositUsd = 0;
@@ -113,6 +133,16 @@ export function computePositionPnl(params: {
   let openedAt: number | null = null;
   let closedAt: number | null = null;
   let increaseEventCount = 0;
+  let costBasisMissing = false;
+  let costBasisSource: PositionPnl["costBasisSource"] = "missing";
+
+  // Authoritative initial deposit from the MINT transaction (block-priced).
+  const mintBlock = mintDeposit?.blockNumber;
+  if (mintDeposit && (mintDeposit.amount0 > 0 || mintDeposit.amount1 > 0)) {
+    depositUsd += mintDeposit.amount0 * mintDeposit.price0Usd + mintDeposit.amount1 * mintDeposit.price1Usd;
+    depositEth += mintDeposit.amount0 * mintDeposit.price0Eth + mintDeposit.amount1 * mintDeposit.price1Eth;
+    costBasisSource = "mint";
+  }
 
   const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
 
@@ -120,9 +150,15 @@ export function computePositionPnl(params: {
     if (e.eventType === "increase") {
       // Skip zero-amount noise
       if (e.amount0 === 0 && e.amount1 === 0) continue;
+      // Don't double-count the initial mint (mint IS the first increase event)
+      if (mintDeposit && mintBlock != null && (e.blockNumber ?? 0) <= mintBlock) {
+        continue;
+      }
       depositUsd += eventValue(e, "usd");
       depositEth += eventValue(e, "eth");
       increaseEventCount += 1;
+      if (costBasisSource === "missing" || costBasisSource === "events")
+        costBasisSource = "events";
       if (openedAt == null) openedAt = e.timestamp;
     } else if (e.eventType === "decrease") {
       withdrawnUsd += eventValue(e, "usd");
@@ -137,7 +173,7 @@ export function computePositionPnl(params: {
     }
   }
 
-  const costBasisMissing = increaseEventCount === 0;
+  costBasisMissing = costBasisSource === "missing";
 
   // Principal mark (currentValue*) + unclaimed fees separate
   // net = withdraw + feesCollected + principalNow + unclaimed - deposit
@@ -153,25 +189,18 @@ export function computePositionPnl(params: {
   let pricePnlUsd: number;
   let pricePnlEth: number;
 
-  if (costBasisMissing && isOpen) {
-    // WITHOUT real deposit: do NOT fake deposit=current (that made all profit look like fees).
-    // Show unclaimed fees as the only known P&L component; principal IL unknown.
+  if (costBasisMissing) {
+    // Cannot compute PnL without deposit (doc: PnL = (current + unclaimed) - deposit).
+    // currentValueUsd / unclaimedFeesUsd are still returned so the UI can show
+    // the total position value; netPnl / pnlPct are zeroed (pnlPct = null).
     depositUsd = 0;
     depositEth = 0;
-    netPnlUsd = unclUsd; // known: unclaimed fees only
-    netPnlEth = unclEth;
-    feePnlUsd = unclUsd + feesCollectedUsd;
-    feePnlEth = unclEth + feesCollectedEth;
-    pricePnlUsd = 0; // unknown without cost basis
+    netPnlUsd = 0;
+    netPnlEth = 0;
+    feePnlUsd = 0;
+    feePnlEth = 0;
+    pricePnlUsd = 0;
     pricePnlEth = 0;
-  } else if (costBasisMissing && !isOpen) {
-    // Closed with no events — nothing reliable
-    netPnlUsd = withdrawnUsd + feesCollectedUsd - depositUsd;
-    netPnlEth = withdrawnEth + feesCollectedEth - depositEth;
-    feePnlUsd = feesCollectedUsd;
-    feePnlEth = feesCollectedEth;
-    pricePnlUsd = netPnlUsd - feePnlUsd;
-    pricePnlEth = netPnlEth - feePnlEth;
   } else {
     // Real cost basis from IncreaseLiquidity amounts
     netPnlUsd =
@@ -217,6 +246,7 @@ export function computePositionPnl(params: {
     isOpen,
     costBasisMissing,
     increaseEventCount,
+    costBasisSource,
   };
 }
 
