@@ -934,19 +934,6 @@ export async function indexAddress(
   await checkpoint(35, `Filtering open among ${heldIds.length}…`);
   const openIds: bigint[] = [];
   const closedHeldIds: bigint[] = [];
-
-  // Also scan for burned (closed) NFTs via Transfer events FROM the owner
-  const burnedV3 = await listBurnedV3TokenIds(owner);
-  if (burnedV3.length) {
-    console.log(`[index] found ${burnedV3.length} burned V3 NFTs`);
-    for (const id of burnedV3) {
-      if (!heldIds.some((h) => h === id)) heldIds.push(id);
-    }
-  }
-  const burnedV4 = await listBurnedV4TokenIds(owner);
-  if (burnedV4.length) {
-    console.log(`[index] found ${burnedV4.length} burned V4 NFTs`);
-  }
   await mapPool(heldIds, 12, async (tokenId) => {
     if (!ok()) return;
     const raw = await readPosition(tokenId).catch(() => null);
@@ -1037,6 +1024,23 @@ export async function indexAddress(
   // Background: never blocks first response
   void (async () => {
     if (cancelled()) return;
+
+    // Scan for burned (closed) V3+V4 NFTs — heavy, kept in background
+    const burnedV3 = await listBurnedV3TokenIds(owner);
+    if (burnedV3.length) {
+      console.log(`[index] bg found ${burnedV3.length} burned V3 NFTs`);
+      for (const id of burnedV3) {
+        if (!heldIds.some((h) => h === id)) heldIds.push(id);
+        if (!closedHeldIds.some((h) => h === id)) {
+          const raw = await readPosition(id).catch(() => null);
+          if (raw && raw.liquidity === 0n) closedHeldIds.push(id);
+        }
+      }
+    }
+    const burnedV4 = await listBurnedV4TokenIds(owner);
+    if (burnedV4.length) {
+      console.log(`[index] bg found ${burnedV4.length} burned V4 NFTs`);
+    }
 
     // Enrich open V3 with Increase + Collect (claimed fees + cost basis)
     await mapPool(openIds, 2, async (tokenId) => {
