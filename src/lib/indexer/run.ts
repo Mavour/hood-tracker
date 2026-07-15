@@ -789,7 +789,7 @@ async function backfillClosedHistory(
   const eventsByPosition = new Map(openEvents);
 
   let done = 0;
-  await mapPool(closedIds, 4, async (tokenId) => {
+  await mapPool(closedIds, 2, async (tokenId) => {
     if (isIndexCancelled(address, gen)) return;
     done += 1;
     if (done % 3 === 0 || done === closedIds.length) {
@@ -818,7 +818,7 @@ async function backfillClosedHistory(
   // V4 closed positions
   if (v4ClosedIds.length) {
     let v4Done = 0;
-    await mapPool(v4ClosedIds, 3, async (tokenId) => {
+    await mapPool(v4ClosedIds, 2, async (tokenId) => {
       if (isIndexCancelled(address, gen)) return;
       v4Done += 1;
       if (v4Done % 2 === 0 || v4Done === v4ClosedIds.length) {

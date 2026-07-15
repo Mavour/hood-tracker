@@ -8,7 +8,6 @@
 import {
   createPublicClient,
   http,
-  fallback,
   type PublicClient,
   type Chain,
 } from "viem";
@@ -59,10 +58,7 @@ export function resolveRpcUrl(): string {
 /** Secondary URLs tried if primary fails (public always last resort). */
 function rpcCandidates(): string[] {
   const primary = resolveRpcUrl();
-  const list = [primary];
-  const pub = ROBINHOOD.defaultRpc;
-  if (primary !== pub) list.push(pub);
-  return list;
+  return [primary];
 }
 
 let _client: PublicClient | null = null;
@@ -83,16 +79,12 @@ export function getPublicClient(): PublicClient {
 
   _client = createPublicClient({
     chain: robinhoodChain,
-    transport:
-      transports.length === 1
-        ? transports[0]
-        : fallback(transports, { rank: false }),
+    transport: transports[0],
   });
   _boundUrl = key;
 
   if (process.env.NODE_ENV !== "production") {
     console.log("[rpc] Robinhood →", urls[0]);
-    if (urls.length > 1) console.log("[rpc] fallback →", urls.slice(1).join(", "));
   }
 
   return _client;
