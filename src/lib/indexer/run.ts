@@ -50,8 +50,6 @@ import {
 import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { isIndexCancelled } from "./cancel";
 
-const EVENTS_FROM_BLOCK = 1n;
-
 export type PositionView = PositionPnl & {
   protocol: "v3" | "v4";
   poolAddress: string | null;
@@ -350,25 +348,27 @@ async function buildOnePosition(
     livePos?.poolAddress ?? (await resolvePool(token0, token1, fee));
 
   let events: PositionEvent[] = [];
-  if (opts.fetchEvents) {
-    try {
-      // Hard budget: race events vs 8s so open path never hangs
-      events = await Promise.race([
-        getPositionEvents(
-          tokenId,
-          EVENTS_FROM_BLOCK,
-          latest,
-          token0,
-          token1,
-          undefined,
-          { mode: "fast" },
-        ),
-        new Promise<PositionEvent[]>((r) => setTimeout(() => r([]), 8_000)),
-      ]);
-    } catch (e) {
-      console.warn("[index] events", tokenId.toString(), e);
+    if (opts.fetchEvents) {
+      try {
+        // Scan only recent history for open (8s), full range for closed (15s)
+        const scanFrom = isOpen ? (latest > 3_000_000n ? latest - 3_000_000n : 1n) : 1n;
+        const budget = isOpen ? 8_000 : 15_000;
+        events = await Promise.race([
+          getPositionEvents(
+            tokenId,
+            scanFrom,
+            latest,
+            token0,
+            token1,
+            undefined,
+            { mode: "fast" },
+          ),
+          new Promise<PositionEvent[]>((r) => setTimeout(() => r([]), budget)),
+        ]);
+      } catch (e) {
+        console.warn("[index] events", tokenId.toString(), e);
+      }
     }
-  }
 
   const priced = await priceEventsAtBlocks(
     events,
