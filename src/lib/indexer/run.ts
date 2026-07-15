@@ -533,7 +533,7 @@ async function buildOneV4Position(
   let events: PositionEvent[] = [];
   if (fetchEvents) {
     try {
-      events = await getV4PositionEvents(vp);
+      events = await getV4PositionEvents(vp, vp.owner);
     } catch (e) {
       console.warn("[v4] events", vp.tokenId.toString(), e);
     }
