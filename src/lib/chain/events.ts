@@ -137,8 +137,8 @@ async function getLogsOnce(params: {
       "[events] getLogs fail — using Blockscout fallback",
       e instanceof Error ? e.message.slice(0, 80) : e,
     );
-    // Fallback to Blockscout API
-    return getLogsViaBlockscout(params);
+    // Fallback to Blockscout API (longer timeout — API calls are heavier)
+    return getLogsViaBlockscout({ ...params, timeoutMs: Math.max(params.timeoutMs, 10_000) });
   }
 }
 
