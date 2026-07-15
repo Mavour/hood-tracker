@@ -74,7 +74,9 @@ export async function getV4PositionEvents(
   const pm = getV4PoolManager();
   const tokenId = pos.tokenId;
   const salt = pad(toHex(tokenId), { size: 32 });
-  const from = toBlock > 3_000_000n ? toBlock - 3_000_000n : 1n;
+  // Events are indexed by poolId + salt (ModifyLiquidity) and tokenId (Transfer),
+  // so scanning from block 1 is fast even on long chains
+  const from = 1n;
 
   const events: PositionEvent[] = [];
 
@@ -88,7 +90,7 @@ export async function getV4PositionEvents(
         fromBlock: from,
         toBlock,
       }),
-      10_000,
+      15_000,
     );
     for (const log of xfer) {
       const fromA = (log.args.from as Address)?.toLowerCase();
@@ -124,7 +126,7 @@ export async function getV4PositionEvents(
         fromBlock: from,
         toBlock,
       }),
-      12_000,
+      18_000,
     );
     for (const log of mods) {
       const logSalt = (log.args.salt as Hex)?.toLowerCase();
