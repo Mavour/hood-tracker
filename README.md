@@ -1,36 +1,171 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Robinhood PNL LP Viewer
 
-## Getting Started
+Read-only web app to view **Uniswap V3 & V4 liquidity provider PnL** on **Robinhood Chain** (chain ID `4663`).
 
-First, run the development server:
+UI styled after Robinhood’s crypto brand language (black / white / Robin Neon).
+
+## Status (WIP)
+
+| Area | Status |
+|------|--------|
+| Open / closed position listing (V3, V4) | Working |
+| Live open marks | Working (best-effort) |
+| **PnL accuracy** (cost basis, claimed fees history, calendar, closed realized) | **Not finished** — deposit/events often incomplete |
+| First-scan speed | Target &lt;10s for open marks only; history in background |
+
+Do not treat dollar/ETH PnL as final until cost-basis indexing is hardened.
+
+- Paste a public `0x` address — **no wallet connect, no private keys, no permanent user DB**
+- Dual denomination: **USD** and **ETH** (toggle is instant)
+- Monthly **calendar heatmap** with fee vs price/IL breakdown
+- Open & closed positions with explorer links
+
+## Stack
+
+| Layer | Tech |
+|--------|------|
+| Frontend | Next.js 14 (App Router) + TypeScript + Tailwind |
+| Chain | `viem` → Alchemy / public Robinhood RPC |
+| Cache | Postgres (events/prices) + Redis (optional PnL cache / BullMQ) |
+| Worker | In-process job (default) or `worker/index.ts` via BullMQ |
+
+## Quick start
 
 ```bash
+# 1. Install
+npm install
+
+# 2. Env
+cp .env.example .env
+# Optional but recommended:
+#   ALCHEMY_API_KEY=...
+#   ROBINHOOD_CHAIN_RPC=https://robinhood-mainnet.g.alchemy.com/v2/<KEY>
+
+# 3. (Optional) Postgres + Redis
+npm run db:up
+
+# 4. Dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Without Docker, the app uses an **in-memory store** so you can still demo UI + live RPC reads.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+See [`.env.example`](./.env.example).
 
-## Learn More
+| Variable | Purpose |
+|----------|---------|
+| `ALCHEMY_API_KEY` | Preferred RPC (Alchemy Robinhood mainnet) |
+| `ROBINHOOD_CHAIN_RPC` | Override full RPC URL |
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Redis for cache + BullMQ worker |
+| `NPM_CONTRACT_ADDRESS` | NonfungiblePositionManager (default from config) |
+| `UNISWAP_V3_FACTORY_ADDRESS` | V3 factory |
+| `PNL_CACHE_TTL` | Seconds (default 300) |
+| `RATE_LIMIT_TRACK_PER_HOUR` | Track API rate limit per IP |
 
-To learn more about Next.js, take a look at the following resources:
+## Contract addresses (Robinhood Chain)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Defined in [`config/contracts.ts`](./config/contracts.ts) (sourced from on-chain / unicrit reference):
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Contract | Address |
+|----------|---------|
+| UniswapV3Factory | `0x1f7d7550b1b028f7571e69a784071f0205fd2efa` |
+| NonfungiblePositionManager | `0x73991a25c818bf1f1128deaab1492d45638de0d3` |
+| WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` |
+| USDG | `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` |
 
-## Deploy on Vercel
+**TODO before production:** re-verify against Uniswap official deployments + [Blockscout](https://robinhoodchain.blockscout.com).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## PnL formula
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Per NFT position (aligned with unicrit + product spec):
+
+```
+depositValue   = Σ IncreaseLiquidity amounts × price_at_event
+withdrawnValue = Σ DecreaseLiquidity amounts × price_at_event
+feesCollected  = Σ Collect amounts × price_at_event
+currentValue   = open liquidity amounts + unclaimed fees (live), else 0
+
+netPnL   = withdrawn + feesCollected + currentValue − deposit
+feePnL   = feesCollected (+ unclaimed if open)
+pricePnL = netPnL − feePnL   // IL / price component
+```
+
+Pure engine: `src/lib/pnl/compute.ts`  
+Unit check: `npm run test:pnl`
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/track` | Body `{ address, force? }` → `{ status, jobId }` |
+| `GET` | `/api/track?jobId=` | Job progress |
+| `GET` | `/api/pnl/:address?currency=usd\|eth&range=...` | Summary + daily + positions |
+| `GET` | `/api/pnl/:address/day/:date` | Day detail |
+| `GET` | `/api/pnl/:address/position/:tokenId` | Single position + events |
+
+## Project layout
+
+```
+config/contracts.ts      # Chain + Uniswap addresses
+db/schema.sql            # Postgres schema (cache only)
+src/lib/chain/           # viem client, positions, events, math, fees
+src/lib/pricing/         # Pool / DexScreener dual prices
+src/lib/pnl/             # Pure PnL engine
+src/lib/indexer/         # Address indexing pipeline
+src/lib/db/              # Postgres + memory fallback
+src/lib/cache/           # Redis + memory fallback
+src/app/api/             # API routes
+src/components/          # Landing, dashboard, calendar, lists
+worker/index.ts          # Optional BullMQ worker
+ecosystem.config.cjs     # PM2 (app + worker)
+docker-compose.yml       # Postgres + Redis
+```
+
+## Deploy (VPS)
+
+```bash
+# Docker deps
+docker compose up -d
+
+# Build
+npm ci
+npm run build
+
+# PM2
+pm2 start ecosystem.config.cjs
+pm2 save
+```
+
+Nginx sketch:
+
+```nginx
+server {
+  listen 80;
+  server_name pnl.example.com;
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 300s;
+  }
+}
+```
+
+Then: `certbot --nginx -d pnl.example.com`
+
+## Notes / risks
+
+- Robinhood Chain is new (mainnet ~ July 2026); pool spot prices can be thin — prefer TWAP for production mark-to-market.
+- Single sequencer → handle RPC retries / show “last updated” gracefully (UI already shows `computedAt`).
+- Historical ETH/USD ideally via Chainlink rounds; current code uses live ETH/USD as approximation when historical oracle rounds are not configured.
+- Rate-limited `POST /api/track` to protect Alchemy compute units.
+
+## License
+
+MIT

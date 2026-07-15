@@ -1,0 +1,418 @@
+/**
+ * V3 NPM events — FAST path for open positions, full path optional.
+ *
+ * Public UX: phase-1 must not hang on mint-scan / multi-million-block chunking.
+ */
+
+import {
+  type Address,
+  type Hex,
+  parseAbiItem,
+  zeroAddress,
+} from "viem";
+import { getNpmAddress } from "@config/contracts";
+import { getPublicClient, getRpcUrl } from "./client";
+import { humanAmount } from "./math";
+import { getTokenMeta } from "./positions";
+
+export type PositionEventType =
+  | "increase"
+  | "decrease"
+  | "collect"
+  | "transfer_mint"
+  | "transfer_burn";
+
+export type PositionEvent = {
+  tokenId: bigint;
+  eventType: PositionEventType;
+  blockNumber: bigint;
+  txHash: Hex;
+  logIndex: number;
+  timestamp: number;
+  amount0: number;
+  amount1: number;
+  amount0Raw: bigint;
+  amount1Raw: bigint;
+};
+
+const increaseEvent = parseAbiItem(
+  "event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
+);
+const decreaseEvent = parseAbiItem(
+  "event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
+);
+const collectEvent = parseAbiItem(
+  "event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)",
+);
+const transferEvent = parseAbiItem(
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+);
+
+const BLOCK_TIME_SEC = 0.25;
+
+export async function getBlockTimestamp(blockNumber: bigint): Promise<number> {
+  const client = getPublicClient();
+  const block = await client.getBlock({ blockNumber });
+  return Number(block.timestamp);
+}
+
+export async function getLatestBlock(): Promise<bigint> {
+  return getPublicClient().getBlockNumber();
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label?: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`timeout ${ms}ms${label ? `: ${label}` : ""}`)),
+      ms,
+    );
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+function estimateTs(
+  blockNumber: bigint,
+  latest: bigint,
+  latestTs: number,
+): number {
+  if (latestTs > 1_000_000_000) {
+    return Math.max(
+      0,
+      Math.floor(latestTs - Number(latest - blockNumber) * BLOCK_TIME_SEC),
+    );
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+type LogLike = {
+  blockNumber?: bigint | null;
+  transactionHash?: Hex | null;
+  logIndex?: number | null;
+  args?: {
+    amount0?: bigint;
+    amount1?: bigint;
+    from?: Address;
+    to?: Address;
+  };
+};
+
+async function getLogsOnce(params: {
+  event:
+    | typeof increaseEvent
+    | typeof decreaseEvent
+    | typeof collectEvent
+    | typeof transferEvent;
+  tokenId: bigint;
+  fromBlock: bigint;
+  toBlock: bigint;
+  timeoutMs: number;
+  extraArgs?: Record<string, unknown>;
+}): Promise<LogLike[]> {
+  const client = getPublicClient();
+  const npm = getNpmAddress();
+  try {
+    const logs = await withTimeout(
+      client.getLogs({
+        address: npm,
+        event: params.event,
+        args: { tokenId: params.tokenId, ...params.extraArgs } as never,
+        fromBlock: params.fromBlock,
+        toBlock: params.toBlock,
+      }),
+      params.timeoutMs,
+      "getLogs",
+    );
+    return logs as LogLike[];
+  } catch (e) {
+    console.warn(
+      "[events] getLogs fail",
+      e instanceof Error ? e.message.slice(0, 80) : e,
+    );
+    return [];
+  }
+}
+
+async function attachTimestamps(
+  raw: Array<{
+    eventType: PositionEventType;
+    blockNumber: bigint;
+    txHash: Hex;
+    logIndex: number;
+    amount0Raw: bigint;
+    amount1Raw: bigint;
+  }>,
+  tokenId: bigint,
+  meta0: { decimals: number },
+  meta1: { decimals: number },
+  toBlock: bigint,
+): Promise<PositionEvent[]> {
+  if (!raw.length) return [];
+
+  let latestTs = Math.floor(Date.now() / 1000);
+  try {
+    latestTs = await withTimeout(getBlockTimestamp(toBlock), 3_000);
+  } catch {
+    /* keep */
+  }
+
+  const blockSet = [...new Set(raw.map((l) => l.blockNumber.toString()))];
+  const tsMap = new Map<string, number>();
+
+  // Cap block timestamp RPCs — estimate the rest
+  const toFetch = blockSet.slice(0, 12);
+  await Promise.all(
+    toFetch.map(async (bn) => {
+      try {
+        tsMap.set(
+          bn,
+          await withTimeout(getBlockTimestamp(BigInt(bn)), 2_500),
+        );
+      } catch {
+        tsMap.set(bn, estimateTs(BigInt(bn), toBlock, latestTs));
+      }
+    }),
+  );
+  for (const bn of blockSet) {
+    if (!tsMap.has(bn)) {
+      tsMap.set(bn, estimateTs(BigInt(bn), toBlock, latestTs));
+    }
+  }
+
+  const events: PositionEvent[] = raw.map((l) => ({
+    tokenId,
+    eventType: l.eventType,
+    blockNumber: l.blockNumber,
+    txHash: l.txHash,
+    logIndex: l.logIndex,
+    timestamp: tsMap.get(l.blockNumber.toString()) ?? latestTs,
+    amount0: humanAmount(l.amount0Raw, meta0.decimals),
+    amount1: humanAmount(l.amount1Raw, meta1.decimals),
+    amount0Raw: l.amount0Raw,
+    amount1Raw: l.amount1Raw,
+  }));
+
+  events.sort((a, b) => {
+    if (a.blockNumber !== b.blockNumber)
+      return a.blockNumber < b.blockNumber ? -1 : 1;
+    return a.logIndex - b.logIndex;
+  });
+  return events;
+}
+
+export type GetPositionEventsOpts = {
+  /** fast = last 300k blocks, 4s/log, no mint scan, no chunking */
+  mode?: "fast" | "full";
+};
+
+/**
+ * Fetch V3 position events.
+ * `fast` is default for open positions during first paint.
+ */
+export async function getPositionEvents(
+  tokenId: bigint,
+  _fromBlock: bigint,
+  toBlock: bigint,
+  token0: Address,
+  token1: Address,
+  onProgress?: (msg: string) => void,
+  opts?: GetPositionEventsOpts,
+): Promise<PositionEvent[]> {
+  if (process.env.SKIP_POSITION_EVENTS === "1") return [];
+
+  const mode = opts?.mode ?? "fast";
+  const [meta0, meta1] = await Promise.all([
+    getTokenMeta(token0),
+    getTokenMeta(token1),
+  ]);
+
+  // FAST: single window, hard timeouts — must finish in a few seconds
+  const lookback = mode === "fast" ? 400_000n : 2_000_000n;
+  const timeoutMs = mode === "fast" ? 4_000 : 10_000;
+  const from = toBlock > lookback ? toBlock - lookback : 1n;
+
+  onProgress?.(
+    mode === "fast"
+      ? `Events #${tokenId} (fast)…`
+      : `Events #${tokenId} (full)…`,
+  );
+
+  const t0 = Date.now();
+
+  // Only Increase + Collect needed for open PnL cost basis + claimed fees
+  // Decrease optional for open. Skip Transfer in fast mode.
+  const [inc, dec, col] = await Promise.all([
+    getLogsOnce({
+      event: increaseEvent,
+      tokenId,
+      fromBlock: from,
+      toBlock,
+      timeoutMs,
+    }),
+    mode === "fast"
+      ? Promise.resolve([] as LogLike[])
+      : getLogsOnce({
+          event: decreaseEvent,
+          tokenId,
+          fromBlock: from,
+          toBlock,
+          timeoutMs,
+        }),
+    getLogsOnce({
+      event: collectEvent,
+      tokenId,
+      fromBlock: from,
+      toBlock,
+      timeoutMs,
+    }),
+  ]);
+
+  const raw: Array<{
+    eventType: PositionEventType;
+    blockNumber: bigint;
+    txHash: Hex;
+    logIndex: number;
+    amount0Raw: bigint;
+    amount1Raw: bigint;
+  }> = [];
+
+  for (const log of inc) {
+    raw.push({
+      eventType: "increase",
+      blockNumber: log.blockNumber!,
+      txHash: log.transactionHash!,
+      logIndex: log.logIndex ?? 0,
+      amount0Raw: log.args?.amount0 ?? 0n,
+      amount1Raw: log.args?.amount1 ?? 0n,
+    });
+  }
+  for (const log of dec) {
+    raw.push({
+      eventType: "decrease",
+      blockNumber: log.blockNumber!,
+      txHash: log.transactionHash!,
+      logIndex: log.logIndex ?? 0,
+      amount0Raw: log.args?.amount0 ?? 0n,
+      amount1Raw: log.args?.amount1 ?? 0n,
+    });
+  }
+  for (const log of col) {
+    raw.push({
+      eventType: "collect",
+      blockNumber: log.blockNumber!,
+      txHash: log.transactionHash!,
+      logIndex: log.logIndex ?? 0,
+      amount0Raw: log.args?.amount0 ?? 0n,
+      amount1Raw: log.args?.amount1 ?? 0n,
+    });
+  }
+
+  // If fast found nothing, one more shot with wider window (still no chunk loop)
+  if (mode === "fast" && raw.length === 0) {
+    const from2 = toBlock > 1_500_000n ? toBlock - 1_500_000n : 1n;
+    const [inc2, col2] = await Promise.all([
+      getLogsOnce({
+        event: increaseEvent,
+        tokenId,
+        fromBlock: from2,
+        toBlock,
+        timeoutMs: 5_000,
+      }),
+      getLogsOnce({
+        event: collectEvent,
+        tokenId,
+        fromBlock: from2,
+        toBlock,
+        timeoutMs: 5_000,
+      }),
+    ]);
+    for (const log of inc2) {
+      raw.push({
+        eventType: "increase",
+        blockNumber: log.blockNumber!,
+        txHash: log.transactionHash!,
+        logIndex: log.logIndex ?? 0,
+        amount0Raw: log.args?.amount0 ?? 0n,
+        amount1Raw: log.args?.amount1 ?? 0n,
+      });
+    }
+    for (const log of col2) {
+      raw.push({
+        eventType: "collect",
+        blockNumber: log.blockNumber!,
+        txHash: log.transactionHash!,
+        logIndex: log.logIndex ?? 0,
+        amount0Raw: log.args?.amount0 ?? 0n,
+        amount1Raw: log.args?.amount1 ?? 0n,
+      });
+    }
+  }
+
+  const events = await attachTimestamps(raw, tokenId, meta0, meta1, toBlock);
+  console.log(
+    `[events] #${tokenId} mode=${mode} n=${events.length} inc=${inc.length} col=${col.length} ${Date.now() - t0}ms`,
+  );
+  return events;
+}
+
+export async function discoverTokenIdsViaAlchemy(
+  owner: Address,
+): Promise<bigint[]> {
+  const rpc = getRpcUrl();
+  if (!rpc.includes("alchemy")) return [];
+  const npm = getNpmAddress();
+  const ids = new Set<string>();
+  try {
+    const res = await withTimeout(
+      fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "alchemy_getAssetTransfers",
+          params: [
+            {
+              fromBlock: "0x0",
+              toBlock: "latest",
+              toAddress: owner,
+              contractAddresses: [npm],
+              category: ["erc721"],
+              maxCount: "0x64",
+            },
+          ],
+        }),
+      }).then((r) => r.json()),
+      6_000,
+    ) as {
+      result?: {
+        transfers?: Array<{ tokenId?: string; erc721TokenId?: string }>;
+      };
+    };
+    for (const t of res.result?.transfers ?? []) {
+      const raw = t.tokenId ?? t.erc721TokenId;
+      if (raw != null) {
+        try {
+          ids.add(BigInt(raw).toString());
+        } catch {
+          /* skip */
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[alchemy discover]", e);
+  }
+  return [...ids].map((s) => BigInt(s));
+}
+
+// silence
+void zeroAddress;
+void transferEvent;

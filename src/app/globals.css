@@ -3,25 +3,113 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #050506;
+  --foreground: #f4f5f7;
+  --rh-neon: #d4ff00;
+  --rh-green: #00d66b;
+  --rh-red: #ff4d4d;
+  --rh-card: #101218;
+  --rh-elevated: #161922;
+  --rh-line: #252836;
+  --rh-muted: #8b90a0;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background: #050506;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 1;
+  background-image:
+    radial-gradient(ellipse 90% 55% at 15% -5%, rgba(212, 255, 0, 0.13), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 5%, rgba(139, 124, 255, 0.11), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 70% 100%, rgba(61, 255, 232, 0.06), transparent 50%),
+    linear-gradient(180deg, transparent 0%, #050506 85%);
+}
+
+/* subtle grid */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black, transparent);
+}
+
+@layer components {
+  .rh-card {
+    border-radius: 1.25rem;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.04) 0%, transparent 42%),
+      #101218;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+
+  .rh-card-glow {
+    border-radius: 1.25rem;
+    border: 1px solid rgba(212, 255, 0, 0.15);
+    background:
+      radial-gradient(ellipse 100% 80% at 50% -20%, rgba(212, 255, 0, 0.12), transparent 55%),
+      linear-gradient(160deg, rgba(255, 255, 255, 0.05) 0%, transparent 45%),
+      #101218;
+    box-shadow:
+      0 0 0 1px rgba(212, 255, 0, 0.06),
+      0 12px 40px rgba(0, 0, 0, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .rh-stat {
+    border-radius: 0.875rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(22, 25, 34, 0.85);
+    backdrop-filter: blur(8px);
+  }
+
+  .rh-pill {
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(16, 18, 24, 0.9);
+  }
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
   }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #050506;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2e3a;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3f4e;
+}
+
+::selection {
+  background: rgba(212, 255, 0, 0.35);
+  color: #050506;
 }

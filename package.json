@@ -6,21 +6,40 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:pnl": "tsx src/lib/pnl/compute.test.ts",
+    "worker": "tsx worker/index.ts",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down"
   },
   "dependencies": {
+    "@uniswap/sdk-core": "^7.18.0",
+    "@uniswap/v3-sdk": "^3.31.0",
+    "bullmq": "^5.80.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.4.0",
+    "ioredis": "^5.11.1",
+    "jsbi": "^4.3.2",
+    "lucide-react": "^1.24.0",
+    "next": "14.2.35",
+    "pg": "^8.22.0",
     "react": "^18",
     "react-dom": "^18",
-    "next": "14.2.35"
+    "tailwind-merge": "^3.6.0",
+    "viem": "^2.55.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "typescript": "^5",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.35",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.35"
+    "tsx": "^4.23.1",
+    "typescript": "^5"
   }
 }
