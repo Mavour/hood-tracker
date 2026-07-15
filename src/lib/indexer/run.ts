@@ -934,7 +934,7 @@ export async function indexAddress(
   await checkpoint(35, `Filtering open among ${heldIds.length}…`);
   const openIds: bigint[] = [];
   const closedHeldIds: bigint[] = [];
-  await mapPool(heldIds, 12, async (tokenId) => {
+  await mapPool(heldIds, 4, async (tokenId) => {
     if (!ok()) return;
     const raw = await readPosition(tokenId).catch(() => null);
     if (!raw) return;
