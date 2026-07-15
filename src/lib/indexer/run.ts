@@ -22,9 +22,12 @@ import {
   getTokenMeta,
 } from "../chain/positions";
 import { humanAmount } from "../chain/math";
+import { getPublicClient } from "../chain/client";
 import { getMintDeposit } from "../chain/mint";
 import {
   listLiveV4Positions,
+  getLiveV4Position,
+  getV4PositionManager,
   type LiveV4Position,
 } from "../chain/v4/positions";
 import { getV4PositionEvents } from "../chain/v4/events";
@@ -44,7 +47,7 @@ import {
   saveEvents,
   type IndexJob,
 } from "../db";
-import { ROBINHOOD } from "@config/contracts";
+import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { isIndexCancelled } from "./cancel";
 
 const EVENTS_FROM_BLOCK = 1n;
@@ -250,8 +253,78 @@ async function mapPool<T, R>(
 
 type BuildOpts = {
   fetchEvents: boolean;
-  historyPending?: boolean;
+  historyPending: boolean;
 };
+
+/** Scan Transfer events FROM owner on V3 NPM to find burned/closed NFTs */
+async function listBurnedV3TokenIds(owner: Address): Promise<bigint[]> {
+  const client = getPublicClient();
+  const npm = getNpmAddress();
+  try {
+    const result = await Promise.race([
+      (client as { getLogs: (p: Record<string, unknown>) => Promise<unknown> }).getLogs({
+        address: npm,
+        event: {
+          type: "event",
+          name: "Transfer",
+          inputs: [
+            { name: "from", type: "address", indexed: true },
+            { name: "to", type: "address", indexed: true },
+            { name: "tokenId", type: "uint256", indexed: true },
+          ],
+        },
+        args: { from: owner },
+        fromBlock: 1n,
+        toBlock: "latest" as const,
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000)),
+    ]);
+    const logs = result as Array<{ args: { tokenId?: bigint } }>;
+    const ids = new Set<string>();
+    for (const log of logs) {
+      if (log.args?.tokenId) ids.add(log.args.tokenId.toString());
+    }
+    return [...ids].map((s) => BigInt(s));
+  } catch (e) {
+    console.warn("[burned v3]", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
+
+/** Scan Transfer events FROM owner on V4 PositionManager */
+async function listBurnedV4TokenIds(owner: Address): Promise<bigint[]> {
+  const client = getPublicClient();
+  const posm = getV4PositionManager();
+  try {
+    const result = await Promise.race([
+      (client as { getLogs: (p: Record<string, unknown>) => Promise<unknown> }).getLogs({
+        address: posm,
+        event: {
+          type: "event",
+          name: "Transfer",
+          inputs: [
+            { name: "from", type: "address", indexed: true },
+            { name: "to", type: "address", indexed: true },
+            { name: "tokenId", type: "uint256", indexed: true },
+          ],
+        },
+        args: { from: owner },
+        fromBlock: 1n,
+        toBlock: "latest" as const,
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000)),
+    ]);
+    const logs = result as Array<{ args: { tokenId?: bigint } }>;
+    const ids = new Set<string>();
+    for (const log of logs) {
+      if (log.args?.tokenId) ids.add(log.args.tokenId.toString());
+    }
+    return [...ids].map((s) => BigInt(s));
+  } catch (e) {
+    console.warn("[burned v4]", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
 
 async function buildOnePosition(
   tokenId: bigint,
@@ -691,18 +764,24 @@ async function backfillClosedHistory(
   owner: Address,
   latest: bigint,
   closedIds: bigint[],
+  v4ClosedIds: bigint[],
   openViews: PositionView[],
   openPnls: PositionPnl[],
   openEvents: Map<string, PricedEvent[]>,
   liveMap: Map<string, NonNullable<Awaited<ReturnType<typeof getLivePosition>>>>,
 ) {
   if (isIndexCancelled(address, gen)) return;
-  if (!closedIds.length) return;
+  const totalClosed = closedIds.length + v4ClosedIds.length;
+  if (!totalClosed) return;
+
+  console.log(
+    `[index] backfill start v3=${closedIds.length} v4=${v4ClosedIds.length}`,
+  );
 
   await updateJob(jobId, address, {
     status: "ready",
     progress: 92,
-    progressMessage: `Backfilling history 0/${closedIds.length} (dashboard already ready)…`,
+    progressMessage: `Backfilling ${totalClosed} closed (${closedIds.length} V3 + ${v4ClosedIds.length} V4)…`,
   });
 
   const closedViews: PositionView[] = [];
@@ -716,8 +795,8 @@ async function backfillClosedHistory(
     if (done % 3 === 0 || done === closedIds.length) {
       await updateJob(jobId, address, {
         status: "ready",
-        progress: 92 + Math.floor((done / closedIds.length) * 7),
-        progressMessage: `Backfilling history ${done}/${closedIds.length}…`,
+        progress: 92 + Math.floor((done / totalClosed) * 7),
+        progressMessage: `Backfilling V3 history ${done}/${closedIds.length}…`,
       });
     }
 
@@ -733,6 +812,33 @@ async function backfillClosedHistory(
       eventsByPosition.set(tokenId.toString(), built.priced);
     }
   });
+
+  if (isIndexCancelled(address, gen)) return;
+
+  // V4 closed positions
+  if (v4ClosedIds.length) {
+    let v4Done = 0;
+    await mapPool(v4ClosedIds, 3, async (tokenId) => {
+      if (isIndexCancelled(address, gen)) return;
+      v4Done += 1;
+      if (v4Done % 2 === 0 || v4Done === v4ClosedIds.length) {
+        await updateJob(jobId, address, {
+          status: "ready",
+          progress: 92 + Math.floor(((closedIds.length + v4Done) / totalClosed) * 7),
+          progressMessage: `Backfilling V4 history ${v4Done}/${v4ClosedIds.length}…`,
+        });
+      }
+
+      const vp = await getLiveV4Position(tokenId, owner).catch(() => null);
+      if (!vp) return;
+      const built = await buildOneV4Position(vp, latest, true).catch(() => null);
+      if (built) {
+        closedViews.push(built.view);
+        closedPnls.push(built.pnl);
+        eventsByPosition.set(`v4:${tokenId}`, built.priced);
+      }
+    });
+  }
 
   if (isIndexCancelled(address, gen)) return;
 
@@ -828,6 +934,19 @@ export async function indexAddress(
   await checkpoint(35, `Filtering open among ${heldIds.length}…`);
   const openIds: bigint[] = [];
   const closedHeldIds: bigint[] = [];
+
+  // Also scan for burned (closed) NFTs via Transfer events FROM the owner
+  const burnedV3 = await listBurnedV3TokenIds(owner);
+  if (burnedV3.length) {
+    console.log(`[index] found ${burnedV3.length} burned V3 NFTs`);
+    for (const id of burnedV3) {
+      if (!heldIds.some((h) => h === id)) heldIds.push(id);
+    }
+  }
+  const burnedV4 = await listBurnedV4TokenIds(owner);
+  if (burnedV4.length) {
+    console.log(`[index] found ${burnedV4.length} burned V4 NFTs`);
+  }
   await mapPool(heldIds, 12, async (tokenId) => {
     if (!ok()) return;
     const raw = await readPosition(tokenId).catch(() => null);
@@ -908,11 +1027,11 @@ export async function indexAddress(
   await updateJob(jobId, address, {
     status: "ready",
     progress: 90,
-    progressMessage: `Ready in ${(elapsed / 1000).toFixed(1)}s — ${v3Open} V3 + ${v4Open} V4 open (live). History in background…`,
+    progressMessage: `Ready in ${(elapsed / 1000).toFixed(1)}s — ${v3Open} V3 + ${v4Open} V4 open (live). ${closedHeldIds.length} V3 closed in background…`,
   });
 
   console.log(
-    `[index] FIRST PAINT ${elapsed}ms open v3=${v3Open} v4=${v4Open} held=${heldIds.length}`,
+    `[index] FIRST PAINT ${elapsed}ms open v3=${v3Open} v4=${v4Open} held=${heldIds.length} closed=${closedHeldIds.length}`,
   );
 
   // Background: never blocks first response
@@ -941,13 +1060,18 @@ export async function indexAddress(
     if (cancelled()) return;
 
     // V4: retry in background if not found during first paint
+    // Also collect closed V4 positions for backfill
+    const v4ClosedIds: bigint[] = [...burnedV4]; // start with historically burned
     const hasV4 = openViews.some((v) => v.protocol === "v4");
     if (!hasV4) {
       try {
         const v4Live = await listLiveV4Positions(owner);
         for (const vp of v4Live) {
           if (cancelled()) return;
-          if (vp.liquidity === 0n) continue;
+          if (vp.liquidity === 0n) {
+            v4ClosedIds.push(vp.tokenId);
+            continue;
+          }
           const built = await buildOneV4Position(vp, latest, true).catch(
             () => null,
           );
@@ -957,11 +1081,22 @@ export async function indexAddress(
           openEvents.set(`v4:${vp.tokenId}`, built.priced);
         }
         if (v4Live.length) {
-          console.log(`[index] bg V4 found ${v4Live.length} positions`);
+          console.log(`[index] bg V4 found ${v4Live.length} positions (${v4ClosedIds.length} closed)`);
         }
       } catch (e) {
         console.warn("[index] bg V4", e);
       }
+    } else {
+      // V4 open was found during first paint; still check for closed V4
+      try {
+        const v4Live = await listLiveV4Positions(owner);
+        for (const vp of v4Live) {
+          if (vp.liquidity === 0n) v4ClosedIds.push(vp.tokenId);
+        }
+        if (v4ClosedIds.length) {
+          console.log(`[index] bg V4 closed: ${v4ClosedIds.length}`);
+        }
+      } catch { /* ignore */ }
     }
 
     if (cancelled()) return;
@@ -979,6 +1114,7 @@ export async function indexAddress(
       owner,
       latest,
       closedHeldIds,
+      v4ClosedIds,
       openViews,
       openPnls,
       openEvents,
