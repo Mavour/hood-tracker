@@ -1,146 +1,132 @@
 /**
  * Normalize V4 position history → same PositionEvent shape as V3 engine.
- *
- * V4 does not always emit V3-style Collect; fee claims often ride with
- * ModifyLiquidity / take. We still map:
- *  - Transfer mint/burn on PositionManager
- *  - ModifyLiquidity on PoolManager (salt = bytes32(tokenId)):
- *      liquidityDelta > 0 → increase, < 0 → decrease
- *
- * Token amounts for modify are not in the event — amount0/1 left 0 unless
- * we later price via pool at block (MVP: liquidity delta only for open/close timing;
- * cost basis for V4 open uses live principal as last resort is DISABLED —
- * we try to estimate deposit from current liquidity * entry is not available,
- * so we use unclaimed + zero deposit until modify amounts are decoded).
- *
- * Better path: when we only have liquidityDelta, skip amount and mark cost basis
- * missing unless we find associated ERC20 transfers in the same tx (future).
+ * Uses Blockscout API instead of eth_getLogs (Alchemy free tier blocks wide ranges).
  */
 
-import {
-  type Address,
-  type Hex,
-  pad,
-  parseAbiItem,
-  toHex,
-  zeroAddress,
-} from "viem";
-import { getPublicClient } from "../client";
+import { type Hex, zeroAddress } from "viem";
+import { ROBINHOOD } from "@config/contracts";
 import type { PositionEvent } from "../events";
-import { getBlockTimestamp } from "../events";
 import {
-  getV4PoolManager,
   getV4PositionManager,
   type LiveV4Position,
 } from "./positions";
 
-const transferEvent = parseAbiItem(
-  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-);
-
-const modifyLiquidityEvent = parseAbiItem(
-  "event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)",
-);
+const MODIFY_TOPIC =
+  "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("timeout")), ms);
     p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
     );
   });
 }
 
+async function fetchTxLogs(
+  txHash: Hex,
+): Promise<Array<{ data: string; topics: string[]; address: string }> | null> {
+  try {
+    const url = `${ROBINHOOD.explorer}/api/v2/transactions/${txHash}/logs`;
+    const res = await withTimeout(fetch(url), 8_000);
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      items?: Array<{ data?: string; topics?: string[]; address?: { hash?: string } }>;
+    };
+    return (data.items ?? []).map((l) => ({
+      data: l.data ?? "0x",
+      topics: l.topics ?? [],
+      address: l.address?.hash ?? "",
+    }));
+  } catch (e) {
+    console.warn("[v4 logs]", e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
 /**
- * Fetch V4 NFT lifecycle + ModifyLiquidity for one tokenId.
- * amount0/amount1 often 0 for ModifyLiquidity (event has liquidityDelta only).
+ * Fetch V4 NFT lifecycle + ModifyLiquidity for one tokenId via Blockscout API.
  */
 export async function getV4PositionEvents(
-  pos: Pick<
-    LiveV4Position,
-    "tokenId" | "poolId" | "tickLower" | "tickUpper" | "token0" | "token1"
-  >,
-  toBlock: bigint,
+  pos: Pick<LiveV4Position, "tokenId">,
 ): Promise<PositionEvent[]> {
-  const client = getPublicClient();
-  const posm = getV4PositionManager();
-  const pm = getV4PoolManager();
   const tokenId = pos.tokenId;
-  const salt = pad(toHex(tokenId), { size: 32 });
-  // Events are indexed by poolId + salt (ModifyLiquidity) and tokenId (Transfer),
-  // so scanning from block 1 is fast even on long chains
-  const from = 1n;
+  const posm = getV4PositionManager();
+  const saltHex = tokenId.toString(16).padStart(64, "0");
 
   const events: PositionEvent[] = [];
+  const seenTx = new Set<string>();
 
-  // NFT transfers
+  // 1) Get token transfers (mint + burn) from Blockscout
   try {
-    const xfer = await withTimeout(
-      client.getLogs({
-        address: posm,
-        event: transferEvent,
-        args: { tokenId },
-        fromBlock: from,
-        toBlock,
-      }),
-      15_000,
-    );
-    for (const log of xfer) {
-      const fromA = (log.args.from as Address)?.toLowerCase();
-      const toA = (log.args.to as Address)?.toLowerCase();
-      let type: PositionEvent["eventType"] | null = null;
-      if (fromA === zeroAddress.toLowerCase()) type = "transfer_mint";
-      else if (toA === zeroAddress.toLowerCase()) type = "transfer_burn";
-      if (!type) continue;
-      events.push({
-        tokenId,
-        eventType: type,
-        blockNumber: log.blockNumber!,
-        txHash: log.transactionHash!,
-        logIndex: log.logIndex ?? 0,
-        timestamp: 0,
-        amount0: 0,
-        amount1: 0,
-        amount0Raw: 0n,
-        amount1Raw: 0n,
-      });
+    const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${posm}/instances/${tokenId}/transfers`;
+    const res = await withTimeout(fetch(xferUrl), 6_000);
+    if (res.ok) {
+      const data = (await res.json()) as {
+        items?: Array<{
+          tx_hash?: string;
+          block_number?: number;
+          type?: string;
+          from?: { hash?: string };
+          to?: { hash?: string };
+          log_index?: number;
+          timestamp?: string;
+        }>;
+      };
+      for (const t of data.items ?? []) {
+        if (!t.tx_hash) continue;
+        seenTx.add(t.tx_hash);
+        const fromA = (t.from?.hash ?? "").toLowerCase();
+        const toA = (t.to?.hash ?? "").toLowerCase();
+        let eventType: PositionEvent["eventType"] | null = null;
+        if (fromA === zeroAddress) eventType = "transfer_mint";
+        else if (toA === zeroAddress) eventType = "transfer_burn";
+        if (!eventType) continue;
+
+        events.push({
+          tokenId,
+          eventType,
+          blockNumber: BigInt(t.block_number ?? 0),
+          txHash: t.tx_hash as Hex,
+          logIndex: t.log_index ?? 0,
+          timestamp: t.timestamp ? Math.floor(new Date(t.timestamp).getTime() / 1000) : 0,
+          amount0: 0,
+          amount1: 0,
+          amount0Raw: 0n,
+          amount1Raw: 0n,
+        });
+      }
     }
   } catch (e) {
-    console.warn("[v4 events] transfer", e instanceof Error ? e.message : e);
+    console.warn("[v4 events] transfer API", e instanceof Error ? e.message : e);
   }
 
-  // PoolManager ModifyLiquidity filtered by poolId, then salt match
-  try {
-    const mods = await withTimeout(
-      client.getLogs({
-        address: pm,
-        event: modifyLiquidityEvent,
-        args: { id: pos.poolId },
-        fromBlock: from,
-        toBlock,
-      }),
-      18_000,
-    );
-    for (const log of mods) {
-      const logSalt = (log.args.salt as Hex)?.toLowerCase();
-      if (logSalt !== salt.toLowerCase()) continue;
-      const delta = log.args.liquidityDelta as bigint;
+  // 2) For each transfer tx, get logs to find ModifyLiquidity events
+  for (const txHash of seenTx) {
+    const logs = await fetchTxLogs(txHash as Hex);
+    if (!logs) continue;
+
+    for (const log of logs) {
+      if (log.topics[0] !== MODIFY_TOPIC) continue;
+
+      // Verify salt matches (last 32 bytes of data)
+      const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
+      if (hex.length < 256) continue;
+      if (hex.slice(192, 256) !== saltHex) continue;
+
+      // Decode liquidityDelta (bytes 128-192)
+      const liqDelta = BigInt("0x" + hex.slice(128, 192));
+      const isNeg = liqDelta > (1n << 255n);
+      const delta = isNeg ? -(liqDelta ^ ((1n << 256n) - 1n)) - 1n : liqDelta;
       if (delta === 0n) continue;
-      // Positive delta = add liquidity; negative = remove
-      // Without token amounts we still record timing for calendar open/close
+
       events.push({
         tokenId,
         eventType: delta > 0n ? "increase" : "decrease",
-        blockNumber: log.blockNumber!,
-        txHash: log.transactionHash!,
-        logIndex: log.logIndex ?? 0,
+        blockNumber: 0n, // filled below
+        txHash: txHash as Hex,
+        logIndex: 0,
         timestamp: 0,
         amount0: 0,
         amount1: 0,
@@ -148,26 +134,9 @@ export async function getV4PositionEvents(
         amount1Raw: 0n,
       });
     }
-  } catch (e) {
-    console.warn("[v4 events] modify", e instanceof Error ? e.message : e);
   }
 
-  // Timestamps
-  const blocks = [...new Set(events.map((e) => e.blockNumber.toString()))];
-  const tsMap = new Map<string, number>();
-  await Promise.all(
-    blocks.map(async (bn) => {
-      try {
-        tsMap.set(bn, await withTimeout(getBlockTimestamp(BigInt(bn)), 4_000));
-      } catch {
-        tsMap.set(bn, Math.floor(Date.now() / 1000));
-      }
-    }),
-  );
-  for (const e of events) {
-    e.timestamp = tsMap.get(e.blockNumber.toString()) ?? 0;
-  }
-
+  // Fill timestamps from transfer events (they carry timestamps)
   events.sort((a, b) => {
     if (a.blockNumber !== b.blockNumber)
       return a.blockNumber < b.blockNumber ? -1 : 1;
@@ -175,7 +144,7 @@ export async function getV4PositionEvents(
   });
 
   console.log(
-    `[v4 events] #${tokenId} n=${events.length} (inc/dec may have 0 token amounts)`,
+    `[v4 events] #${tokenId} n=${events.length} (Blockscout)`,
   );
   return events;
 }
