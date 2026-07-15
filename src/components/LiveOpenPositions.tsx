@@ -142,7 +142,12 @@ export function LiveOpenPositions({
         return (
           <div
             key={r.tokenId}
-            className="rh-card border-rh-green/20 bg-gradient-to-br from-rh-green/10 to-transparent p-5"
+            className={cn(
+              "rh-card p-5",
+              r.inRange
+                ? "border-rh-green/20 bg-gradient-to-br from-rh-green/10 to-transparent"
+                : "border-rh-red/20 bg-gradient-to-br from-rh-red/10 to-transparent",
+            )}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>

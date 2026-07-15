@@ -79,6 +79,11 @@ export function PositionList({
             className={cn(
               "rh-card transition hover:border-white/15",
               compact ? "p-3.5" : "p-5",
+              p.isOpen && p.inRange != null && (
+                p.inRange
+                  ? "border-rh-green/20 bg-gradient-to-br from-rh-green/10 to-transparent"
+                  : "border-rh-red/20 bg-gradient-to-br from-rh-red/10 to-transparent"
+              ),
             )}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
