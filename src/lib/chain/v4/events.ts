@@ -9,6 +9,8 @@ import { getPublicClient } from "../client";
 import type { PositionEvent } from "../events";
 import { getV4PositionManager, getV4PoolManager, type LiveV4Position } from "./positions";
 import { getV4HistoricalAmounts } from "../mint";
+import { humanAmount } from "../math";
+import { getTokenMeta } from "../positions";
 
 const MODIFY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
@@ -454,6 +456,15 @@ export async function fetchModifyLiquidityFromTxs(
   const t0 = token0?.toLowerCase();
   const t1 = token1?.toLowerCase();
 
+  let decimals0 = 18;
+  let decimals1 = 18;
+  if (token0) {
+    try { decimals0 = (await getTokenMeta(token0)).decimals; } catch { /* keep default */ }
+  }
+  if (token1) {
+    try { decimals1 = (await getTokenMeta(token1)).decimals; } catch { /* keep default */ }
+  }
+
   for (const txHash of txHashes) {
     // Try Blockscout first, then RPC fallback
     let logs: TxLogItem[] | null = await fetchTxLogsFromExplorer(txHash);
@@ -503,8 +514,8 @@ export async function fetchModifyLiquidityFromTxs(
           txHash: txHash as Hex,
           logIndex: 0,
           timestamp: 0,
-          amount0: 0,
-          amount1: 0,
+          amount0: humanAmount(amount0, decimals0),
+          amount1: humanAmount(amount1, decimals1),
           amount0Raw: amount0,
           amount1Raw: amount1,
         });
@@ -536,8 +547,8 @@ export async function fetchModifyLiquidityFromTxs(
                 txHash: txHash as Hex,
                 logIndex: 0,
                 timestamp: 0,
-                amount0: 0,
-                amount1: 0,
+                amount0: isToken0 ? humanAmount(value, decimals0) : 0,
+                amount1: isToken1 ? humanAmount(value, decimals1) : 0,
                 amount0Raw: isToken0 ? value : 0n,
                 amount1Raw: isToken1 ? value : 0n,
               });
