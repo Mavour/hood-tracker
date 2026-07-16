@@ -152,3 +152,12 @@ CREATE TABLE IF NOT EXISTS close_history (
 
 CREATE INDEX IF NOT EXISTS idx_close_history_settled ON close_history (settled_at);
 CREATE INDEX IF NOT EXISTS idx_close_history_quote ON close_history (quote_token);
+
+-- ── Migrations: safe ALTER TABLE for existing databases ────────────
+-- These use IF NOT EXISTS so they're idempotent (safe to run on new + existing DBs).
+
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS quote_token   TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS status        TEXT DEFAULT 'open';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS liquidity     TEXT DEFAULT '0';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS opened_at_block BIGINT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS metadata      JSONB DEFAULT '{}';
