@@ -322,6 +322,68 @@ async function fetchModifyLiquidityHashesViaBlockscout(
   }
 }
 
+/** Discover V4 fee collection (collect/claim) tx hashes via Blockscout.
+ *  Collect txs emit ERC20 Transfer events FROM PoolManager/PositionManager TO
+ *  the owner — they don't have ModifyLiquidity events and don't transfer the NFT,
+ *  so they're invisible to all other discovery sources. We search for Transfer
+ *  logs where `to` = owner (topic2) and filter for `from` being PoolManager or
+ *  PositionManager. Using the blockscout module=logs API (no block-range limit). */
+async function fetchV4CollectHashesViaBlockscout(
+  owner: string,
+  token0?: Address,
+  token1?: Address,
+): Promise<string[]> {
+  const pm = getV4PoolManager().toLowerCase();
+  const posm = getV4PositionManager().toLowerCase();
+  const TRANSFER_TOPIC =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const ownerPadded = "0x" + "0".repeat(24) + owner.toLowerCase().slice(2);
+
+  // Search both token0 and token1 contract addresses for Transfer → owner
+  const tokenAddrs = [token0, token1].filter(Boolean) as Address[];
+  if (!tokenAddrs.length) return [];
+
+  const hashes = new Set<string>();
+
+  for (const tokenAddr of tokenAddrs) {
+    const url =
+      `${ROBINHOOD.explorer}/api?module=logs&action=getLogs` +
+      `&fromBlock=0&toBlock=latest` +
+      `&address=${tokenAddr}` +
+      `&topic0=${TRANSFER_TOPIC}&topic2=${ownerPadded}&topic0_2_opr=and`;
+
+    try {
+      const res = await withTimeout(fetch(url), 8_000);
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        status?: string;
+        result?: Array<{
+          data?: string;
+          transactionHash?: string;
+          topics?: string[];
+        }>;
+      };
+      if (json.status === "0" || !Array.isArray(json.result)) continue;
+
+      for (const l of json.result) {
+        // topic1 = from address (padded)
+        const fromTopic = l.topics?.[1] ?? "";
+        const fromAddr = ("0x" + fromTopic.slice(26)).toLowerCase();
+        // Only collect if from is PoolManager or PositionManager
+        if (fromAddr !== pm && fromAddr !== posm) continue;
+        if (l.transactionHash) hashes.add(l.transactionHash);
+      }
+    } catch (e) {
+      console.warn(
+        "[v4 collect blockscout]",
+        e instanceof Error ? e.message.slice(0, 80) : e,
+      );
+    }
+  }
+
+  return [...hashes];
+}
+
 /**
  * Fetch V4 NFT lifecycle + ModifyLiquidity for one tokenId.
  */
@@ -407,6 +469,14 @@ export async function getV4PositionEvents(
     } catch (e) {
       console.warn("[v4 events] fallback", tokenId.toString(), e instanceof Error ? e.message : e);
     }
+  }
+
+  // Source 4: ERC20 Transfer events TO owner FROM PoolManager/PositionManager —
+  // these are fee collections (collect/claim). They don't emit ModifyLiquidity
+  // events and don't involve NFT transfers, so Sources 1-2b miss them entirely.
+  if (owner) {
+    const collectHashes = await fetchV4CollectHashesViaBlockscout(owner, token0, token1);
+    for (const h of collectHashes) allTxHashes.add(h);
   }
 
   // Process all tx hashes through ModifyLiquidity + ERC20 Transfer detection
