@@ -3,12 +3,14 @@
  * Dual denomination (ETH + USD) stored so UI toggle is instant.
  */
 
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import { ROBINHOOD } from "@config/contracts";
 import { poolAbi } from "../chain/abis";
 import { getPublicClient } from "../chain/client";
 import { price0In1FromSqrt } from "../chain/math";
 import { getTokenMeta, resolvePool } from "../chain/positions";
+import { stateViewAbi } from "../chain/v4/abis";
+import { getV4StateView } from "../chain/v4/positions";
 
 export type DualPrice = {
   usd: number;
@@ -449,6 +451,111 @@ export async function getPoolPriceAtBlock(
   } catch {
     console.warn(
       `[pricing] getPoolPriceAtBlock(${poolAddress}, ${blockNumber}) failed — live fallback`,
+    );
+  }
+
+  // Absolute last resort: live prices (degraded historical accuracy)
+  const [p0, p1] = await Promise.all([
+    getTokenPriceLive(token0),
+    getTokenPriceLive(token1),
+  ]);
+  return {
+    price0Usd: p0.usd,
+    price1Usd: p1.usd,
+    price0Eth: p0.eth,
+    price1Eth: p1.eth,
+  };
+}
+
+/**
+ * V4 equivalent of getPoolPriceAtBlock — V4 pools are virtual (live inside the
+ * singleton PoolManager, no per-pool contract), so price is read via
+ * StateView.getSlot0(poolId) instead of pool.slot0(). Same block-matched /
+ * WETH-USDG-bridge logic, no fee-tier guessing (poolId already identifies the
+ * exact pool+fee for this position).
+ */
+export async function getV4PairPriceAtBlock(
+  poolId: Hex,
+  token0: Address,
+  token1: Address,
+  decimals0: number,
+  decimals1: number,
+  blockNumber: bigint,
+): Promise<{ price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number }> {
+  const cacheKey = `v4:${poolId.toLowerCase()}:${blockNumber.toString()}`;
+  const cached = blockPriceCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < BLOCK_PRICE_TTL) return cached.price;
+
+  try {
+    const client = getPublicClient();
+    const stateView = getV4StateView();
+    const slot0 = await client.readContract({
+      address: stateView,
+      abi: stateViewAbi,
+      functionName: "getSlot0",
+      args: [poolId],
+      blockNumber,
+    });
+    const sqrt = slot0[0] as bigint;
+    const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
+
+    if (isWeth(token0)) {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
+        price0Usd: ethUsd,
+        price0Eth: 1,
+        price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
+        price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+      };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
+    }
+    if (isWeth(token1)) {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
+        price0Usd: p0in1 * ethUsd,
+        price0Eth: p0in1,
+        price1Usd: ethUsd,
+        price1Eth: 1,
+      };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
+    }
+    if (isStable(token0)) {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
+        price0Usd: 1,
+        price0Eth: ethUsd > 0 ? 1 / ethUsd : 0,
+        price1Usd: p0in1 > 0 ? 1 / p0in1 : 0,
+        price1Eth: ethUsd > 0 && p0in1 > 0 ? 1 / p0in1 / ethUsd : 0,
+      };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
+    }
+    if (isStable(token1)) {
+      const ethUsd = await ethUsdAtBlock(blockNumber);
+      const out = {
+        price0Usd: p0in1,
+        price0Eth: ethUsd > 0 ? p0in1 / ethUsd : 0,
+        price1Usd: 1,
+        price1Eth: ethUsd > 0 ? 1 / ethUsd : 0,
+      };
+      blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+      return out;
+    }
+    // Generic pair (neither WETH nor stable) — bridge via WETH
+    const ethUsd = await ethUsdAtBlock(blockNumber);
+    const out = {
+      price0Usd: p0in1 * ethUsd,
+      price0Eth: p0in1,
+      price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
+      price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+    };
+    blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
+    return out;
+  } catch {
+    console.warn(
+      `[pricing] getV4PairPriceAtBlock(${poolId}, ${blockNumber}) failed — live fallback`,
     );
   }
 

@@ -502,8 +502,12 @@ export async function fetchModifyLiquidityFromTxs(
             log.blockNumber,
           );
           if (am) {
-            amount0 = eventType === "increase" ? am.amount0 : -(am.amount0);
-            amount1 = eventType === "increase" ? am.amount1 : -(am.amount1);
+            // Keep magnitude positive for both increase and decrease — compute.ts
+            // distinguishes deposit vs withdrawn via eventType, not sign (same
+            // convention as the V3 pipeline). Negating here made withdrawnUsd
+            // go negative for every closed V4 position.
+            amount0 = am.amount0;
+            amount1 = am.amount1;
           }
         }
 

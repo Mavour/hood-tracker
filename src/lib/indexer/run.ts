@@ -7,7 +7,7 @@
  * Users never wait on 40× eth_getLogs for closed NFTs before seeing the dashboard.
  */
 
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import { isAddress } from "viem";
 import {
   getLatestBlock,
@@ -31,7 +31,7 @@ import {
   type LiveV4Position,
 } from "../chain/v4/positions";
 import { getV4PositionEvents } from "../chain/v4/events";
-import { getTokenPriceLive, valueDual, getPoolPriceAtBlock, getPairPriceLiveFromPool } from "../pricing";
+import { getTokenPriceLive, valueDual, getPoolPriceAtBlock, getPairPriceLiveFromPool, getV4PairPriceAtBlock } from "../pricing";
 import {
   computePositionPnl,
   aggregatePortfolio,
@@ -153,7 +153,7 @@ async function priceEventsAtBlocks(
   decimals1: number,
 ): Promise<PricedEvent[]> {
   if (!poolAddress || events.length === 0) {
-    const lp = await livePricesForPair(token0, token1);
+    const lp = await livePricesForPair(token0, token1, poolAddress, decimals0, decimals1);
     return toPriced(events, lp);
   }
 
@@ -173,7 +173,7 @@ async function priceEventsAtBlocks(
       decimals0,
       decimals1,
       BigInt(b),
-    ).catch(() => livePricesForPair(token0, token1));
+    ).catch(() => livePricesForPair(token0, token1, poolAddress, decimals0, decimals1));
     return evs.map((e) => ({
       eventType: e.eventType,
       timestamp: e.timestamp,
@@ -217,6 +217,7 @@ async function resolveMintDeposit(
   poolAddress: Address | null,
   decimals0: number,
   decimals1: number,
+  poolId?: Hex | null,
 ): Promise<MintDeposit | null> {
   const mint = await getMintDeposit({
     protocol,
@@ -229,16 +230,28 @@ async function resolveMintDeposit(
   }).catch(() => null);
   if (!mint || (mint.amount0 === 0n && mint.amount1 === 0n)) return null;
 
-  const prices = poolAddress
-    ? await getPoolPriceAtBlock(
-        poolAddress,
-        token0,
-        token1,
-        decimals0,
-        decimals1,
-        mint.blockNumber,
-      ).catch(() => livePricesForPair(token0, token1))
-    : await livePricesForPair(token0, token1);
+  let prices: { price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number };
+  if (protocol === "v4" && poolId) {
+    prices = await getV4PairPriceAtBlock(
+      poolId,
+      token0,
+      token1,
+      decimals0,
+      decimals1,
+      mint.blockNumber,
+    ).catch(() => livePricesForPair(token0, token1));
+  } else if (poolAddress) {
+    prices = await getPoolPriceAtBlock(
+      poolAddress,
+      token0,
+      token1,
+      decimals0,
+      decimals1,
+      mint.blockNumber,
+    ).catch(() => livePricesForPair(token0, token1, poolAddress, decimals0, decimals1));
+  } else {
+    prices = await livePricesForPair(token0, token1, poolAddress, decimals0, decimals1);
+  }
 
   return {
     amount0: humanAmount(mint.amount0, decimals0),
@@ -615,8 +628,39 @@ async function buildOneV4Position(
     }
   }
 
-  const prices = await livePricesForPair(vp.token0, vp.token1);
-  const priced = toPriced(events, prices);
+  let priced: PricedEvent[];
+  if (events.length === 0) {
+    const prices = await livePricesForPair(vp.token0, vp.token1);
+    priced = toPriced(events, prices);
+  } else {
+    const byBlock = new Map<string, PositionEvent[]>();
+    for (const e of events) {
+      const key = e.blockNumber.toString();
+      if (!byBlock.has(key)) byBlock.set(key, []);
+      byBlock.get(key)!.push(e);
+    }
+    const batches = [...byBlock.entries()];
+    const results = await mapPool(batches, 4, async ([bn, evs]) => {
+      const prices = await getV4PairPriceAtBlock(
+        vp.poolId,
+        vp.token0,
+        vp.token1,
+        vp.decimals0,
+        vp.decimals1,
+        BigInt(bn),
+      ).catch(() => livePricesForPair(vp.token0, vp.token1));
+      return evs.map((e) => ({
+        eventType: e.eventType,
+        timestamp: e.timestamp,
+        amount0: e.amount0,
+        amount1: e.amount1,
+        ...prices,
+        txHash: e.txHash,
+        blockNumber: Number(e.blockNumber),
+      }));
+    });
+    priced = results.flat();
+  }
 
   // V4 mint deposit: resolve during enrichment/events phase, skip during fast first paint
   let mintDeposit: MintDeposit | null = null;
@@ -630,12 +674,21 @@ async function buildOneV4Position(
       null,
       vp.decimals0,
       vp.decimals1,
+      vp.poolId,
     ).catch(() => null);
   }
 
-  // V4 fallback: if on-chain resolution fails for an open position, use current live amounts
+  // V4 fallback: if on-chain resolution fails for an open position, use current
+  // block price via StateView (not the fee-tier-guessing generic lookup)
   if (!mintDeposit && isOpen) {
-    const estPrices = await livePricesForPair(vp.token0, vp.token1);
+    const estPrices = await getV4PairPriceAtBlock(
+      vp.poolId,
+      vp.token0,
+      vp.token1,
+      vp.decimals0,
+      vp.decimals1,
+      latest,
+    ).catch(() => livePricesForPair(vp.token0, vp.token1));
     mintDeposit = {
       amount0: vp.amount0Human,
       amount1: vp.amount1Human,
