@@ -13,6 +13,8 @@ export type MemStore = {
   jobs: Map<string, Record<string, unknown>>;
   pnlCache: Map<string, Record<string, unknown>>;
   deposits: Map<string, Record<string, unknown>>;
+  cashflows: Array<Record<string, unknown>>;
+  closeHistory: Array<Record<string, unknown>>;
   running: Map<string, Promise<unknown>>;
 };
 
@@ -69,6 +71,8 @@ export function getMem(): MemStore {
       jobs: loadMapFile(JOBS_FILE),
       pnlCache: loadMapFile(CACHE_FILE),
       deposits: new Map(),
+      cashflows: [],
+      closeHistory: [],
       running: new Map(),
     };
   }

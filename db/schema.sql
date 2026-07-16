@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS positions (
   pool_address       TEXT,
   token0             TEXT NOT NULL,
   token1             TEXT NOT NULL,
+  quote_token        TEXT,
   fee_tier           INT NOT NULL,
   tick_lower         INT NOT NULL,
   tick_upper         INT NOT NULL,
@@ -13,8 +14,12 @@ CREATE TABLE IF NOT EXISTS positions (
   symbol1            TEXT,
   decimals0          INT DEFAULT 18,
   decimals1          INT DEFAULT 18,
+  status             TEXT DEFAULT 'open',
+  liquidity          TEXT DEFAULT '0',
   opened_at          TIMESTAMPTZ,
   closed_at          TIMESTAMPTZ,
+  opened_at_block    BIGINT,
+  metadata           JSONB DEFAULT '{}',
   last_indexed_block BIGINT DEFAULT 0,
   updated_at         TIMESTAMPTZ DEFAULT NOW()
 );
@@ -108,3 +113,42 @@ CREATE TABLE IF NOT EXISTS address_pnl_cache (
   computed_at    TIMESTAMPTZ DEFAULT NOW(),
   expires_at     TIMESTAMPTZ NOT NULL
 );
+
+-- Cashflows: per-position monetary flows (aligned with UniLP-Monitoring)
+-- flow_type: 'deposit' | 'withdrawal' | 'fee'
+-- quote_value: amount denominated in the position's quote token (BigInt stored as text)
+CREATE TABLE IF NOT EXISTS cashflows (
+  id              BIGSERIAL PRIMARY KEY,
+  position_id     TEXT NOT NULL,
+  block_number    BIGINT NOT NULL,
+  transaction_hash TEXT NOT NULL,
+  flow_type       TEXT NOT NULL CHECK (flow_type IN ('deposit', 'withdrawal', 'fee')),
+  quote_value     NUMERIC NOT NULL DEFAULT 0,
+  metadata        JSONB DEFAULT '{}',
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (position_id, transaction_hash, flow_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cashflows_position ON cashflows (position_id);
+
+-- Close history: permanent record of settled position PnL (aligned with UniLP-Monitoring)
+CREATE TABLE IF NOT EXISTS close_history (
+  id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  position_id           TEXT NOT NULL UNIQUE,
+  chain_id              INT NOT NULL DEFAULT 4663,
+  protocol              TEXT NOT NULL DEFAULT 'v3',
+  token0                TEXT NOT NULL,
+  token1                TEXT NOT NULL,
+  quote_token           TEXT NOT NULL,
+  final_pnl_bps         NUMERIC NOT NULL DEFAULT 0,
+  final_pnl_quote       NUMERIC NOT NULL DEFAULT 0,
+  final_pnl_usd         NUMERIC NOT NULL DEFAULT 0,
+  trigger               TEXT DEFAULT 'settled',
+  close_transaction_hash TEXT,
+  swap_transaction_hash  TEXT,
+  settled_at            TIMESTAMPTZ DEFAULT NOW(),
+  opened_at_block       BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_close_history_settled ON close_history (settled_at);
+CREATE INDEX IF NOT EXISTS idx_close_history_quote ON close_history (quote_token);

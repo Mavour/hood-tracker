@@ -7,9 +7,20 @@
  *      • closed positions → full realized net on their close date
  *      • open positions → unrealized net attributed to today only
  *      • fee collects on their event day (if not already in closed realized)
+ *
+ * Settlement alignment: For settled positions (in close_history),
+ * the final_pnl_usd from close_history is used as the source of truth,
+ * matching UniLP-Monitoring's close_history based calendar approach.
  */
 
 import type { DailyPnl, PositionPnl, PricedEvent } from "./compute";
+
+export type CloseHistoryEntry = {
+  positionId: string;
+  settledAt: string; // ISO date or YYYY-MM-DD
+  finalPnlUsd: number;
+  finalPnlBps: number;
+};
 
 function dayKey(ts: number): string {
   if (!ts || ts < 1_000_000_000) return "";
@@ -44,11 +55,27 @@ function emptyDay(date: string): DailyPnl {
   };
 }
 
+/**
+ * Build daily PnL rows.
+ *
+ * @param eventsByPosition - Raw priced events per position
+ * @param positionPnls - Computed PnL per position
+ * @param closeHistory - Settled positions from close_history (optional, for settlement alignment)
+ */
 export function buildDailyPnl(
   eventsByPosition: Map<string, PricedEvent[]>,
   positionPnls: PositionPnl[],
+  closeHistory?: CloseHistoryEntry[],
 ): DailyPnl[] {
   const days = new Map<string, DailyPnl>();
+
+  // Build a lookup for close_history by positionId
+  const closeMap = new Map<string, CloseHistoryEntry>();
+  if (closeHistory) {
+    for (const ch of closeHistory) {
+      closeMap.set(ch.positionId, ch);
+    }
+  }
 
   function ensure(date: string): DailyPnl | null {
     if (!date || date.startsWith("1970")) return null;
@@ -94,26 +121,42 @@ export function buildDailyPnl(
   }
 
   // ── 2) Closed positions: full realized PnL on close day ──
-  //    (this is what makes "previous days" show profit/loss after exit)
+  //    Use close_history as source of truth when available (settlement alignment)
   for (const p of positionPnls) {
     if (p.isOpen) continue;
 
+    // Check if this position has a close_history entry
+    const ch = closeMap.get(p.tokenId);
+
     let date = "";
-    if (p.closedAt && p.closedAt > 1_000_000_000) {
-      date = dayKey(p.closedAt);
-    } else if (p.openedAt && p.openedAt > 1_000_000_000) {
-      // fallback: last known day = open day if no close ts
-      date = dayKey(p.openedAt);
+    let netPnlUsd: number;
+    let netPnlEth: number;
+
+    if (ch) {
+      // Use close_history data (settlement-aligned)
+      date = ch.settledAt.slice(0, 10);
+      netPnlUsd = ch.finalPnlUsd;
+      // For ETH: derive from USD if possible, otherwise use position PnL
+      netPnlEth = p.netPnlEth; // Keep ETH value from position PnL
+    } else {
+      // Fallback to position PnL
+      if (p.closedAt && p.closedAt > 1_000_000_000) {
+        date = dayKey(p.closedAt);
+      } else if (p.openedAt && p.openedAt > 1_000_000_000) {
+        date = dayKey(p.openedAt);
+      }
+      netPnlUsd = p.netPnlUsd;
+      netPnlEth = p.netPnlEth;
     }
+
     if (!date) continue;
 
     const d = ensure(date);
     if (!d) continue;
 
     d.positionsClosed += 1;
-    // Realized net for the position (already net of deposits/withdraws/fees)
-    d.netPnlUsd += p.netPnlUsd;
-    d.netPnlEth += p.netPnlEth;
+    d.netPnlUsd += netPnlUsd;
+    d.netPnlEth += netPnlEth;
     d.feePnlUsd += p.feePnlUsd;
     d.feePnlEth += p.feePnlEth;
     d.pricePnlUsd += p.pricePnlUsd;

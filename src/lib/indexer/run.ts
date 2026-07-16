@@ -39,12 +39,16 @@ import {
   type PricedEvent,
   type PositionPnl,
 } from "../pnl/compute";
-import { buildDailyPnl } from "../pnl/daily";
+import { buildDailyPnl, type CloseHistoryEntry } from "../pnl/daily";
+import { reconstructCashflowsWithMint } from "../chain/cashflows";
+import { finalizeCloseHistory } from "../pnl/settlement";
+import { adjustTotalReceivedForGas } from "../pnl/gas";
 import {
   upsertJob,
   setPnlCache,
   savePosition,
   saveEvents,
+  getCloseHistoryForPositions,
   type IndexJob,
 } from "../db";
 import { ROBINHOOD } from "@config/contracts";
@@ -477,6 +481,75 @@ async function buildOnePosition(
     (pnl as { openedAt: number | null }).openedAt = openedTs;
   }
 
+  // ── Cashflow reconstruction + settlement finalization ──
+  // Runs when events are available (enrichment/backfill phase)
+  if (opts.fetchEvents && priced.length > 0) {
+    const positionId = tokenId.toString();
+    try {
+      await reconstructCashflowsWithMint(
+        positionId,
+        priced,
+        mintDeposit
+          ? {
+              ...mintDeposit,
+              price0Eth: mintDeposit.price0Eth ?? 0,
+              price1Eth: mintDeposit.price1Eth ?? 0,
+            }
+          : null,
+        isOpen,
+      );
+    } catch (e) {
+      console.warn("[cashflow] reconstruct failed", positionId, e);
+    }
+
+    // Finalize settlement for closed positions
+    if (!isOpen) {
+      try {
+        // Compute totalReceived from the position's settlement events
+        // For closed positions: totalReceived = value of tokens received at close
+        // (derived from decrease/collect events in the same tx as the close)
+        const settlementEvents = priced.filter(
+          (e) =>
+            !isOpen &&
+            (e.eventType === "decrease" || e.eventType === "collect") &&
+            closedTs &&
+            e.timestamp &&
+            Math.abs(e.timestamp - closedTs) < 600, // within 10 min of close
+        );
+        let totalReceived = 0;
+        for (const e of settlementEvents) {
+          totalReceived += e.amount0 * e.price0Usd + e.amount1 * e.price1Usd;
+        }
+
+        // Apply gas deduction if applicable
+        const quoteToken = token0; // Will be refined by settlement module
+        totalReceived = adjustTotalReceivedForGas(
+          totalReceived,
+          {},
+          quoteToken,
+        );
+
+        // Store totalReceived in position metadata for settlement finalization
+        const { updatePositionStatus: _upd } = await import("../db");
+        await _upd(positionId, "closing", {
+          totalReceived: totalReceived.toString(),
+          token0,
+          token1,
+          quoteToken,
+          protocol: "v3",
+          status: isOpen ? "open" : "closing",
+          openedAtBlock: openedTs
+            ? Math.floor(openedTs / 0.25) // approximate block from timestamp
+            : null,
+        });
+
+        await finalizeCloseHistory(positionId);
+      } catch (e) {
+        console.warn("[settlement] finalize failed", tokenId.toString(), e);
+      }
+    }
+  }
+
   const openedAt =
     pnl.openedAt != null ? new Date(pnl.openedAt * 1000).toISOString() : null;
   const closedAt =
@@ -734,6 +807,56 @@ async function buildOneV4Position(
     mintDeposit,
   });
 
+  // ── V4 Cashflow reconstruction + settlement finalization ──
+  if (fetchEvents && priced.length > 0) {
+    const positionId = vp.tokenId.toString();
+    try {
+      await reconstructCashflowsWithMint(
+        positionId,
+        priced,
+        mintDeposit,
+        isOpen,
+      );
+    } catch (e) {
+      console.warn("[cashflow] v4 reconstruct failed", positionId, e);
+    }
+
+    if (!isOpen) {
+      try {
+        const settlementEvents = priced.filter(
+          (e) =>
+            (e.eventType === "decrease" || e.eventType === "collect") &&
+            e.timestamp &&
+            pnl.closedAt &&
+            Math.abs(e.timestamp - pnl.closedAt) < 600,
+        );
+        let totalReceived = 0;
+        for (const e of settlementEvents) {
+          totalReceived += e.amount0 * e.price0Usd + e.amount1 * e.price1Usd;
+        }
+
+        totalReceived = adjustTotalReceivedForGas(totalReceived, {}, vp.token0);
+
+        const { updatePositionStatus: _upd } = await import("../db");
+        await _upd(positionId, "closing", {
+          totalReceived: totalReceived.toString(),
+          token0: vp.token0,
+          token1: vp.token1,
+          quoteToken: vp.token0,
+          protocol: "v4",
+          status: "closing",
+          openedAtBlock: pnl.openedAt
+            ? Math.floor(pnl.openedAt / 0.25)
+            : null,
+        });
+
+        await finalizeCloseHistory(positionId);
+      } catch (e) {
+        console.warn("[settlement] v4 finalize failed", positionId, e);
+      }
+    }
+  }
+
   const view: PositionView = {
     ...pnl,
     protocol: "v4",
@@ -768,15 +891,31 @@ async function buildOneV4Position(
   return { view, pnl, priced };
 }
 
-function publishCache(
+async function publishCache(
   address: string,
   views: PositionView[],
   pnls: PositionPnl[],
   eventsByPosition: Map<string, PricedEvent[]>,
   phase: "fast" | "full",
-): TrackResult {
+): Promise<TrackResult> {
   const summary = aggregatePortfolio(pnls);
-  const daily = buildDailyPnl(eventsByPosition, pnls);
+
+  // Fetch close_history for all positions to align calendar with settlement data
+  let closeHistory: CloseHistoryEntry[] | undefined;
+  try {
+    const positionIds = views.map((v) => v.tokenId);
+    const entries = await getCloseHistoryForPositions(positionIds);
+    closeHistory = entries.map((e) => ({
+      positionId: e.positionId,
+      settledAt: e.settledAt,
+      finalPnlUsd: e.finalPnlUsd,
+      finalPnlBps: e.finalPnlBps,
+    }));
+  } catch {
+    closeHistory = undefined;
+  }
+
+  const daily = buildDailyPnl(eventsByPosition, pnls, closeHistory);
   const computedAt = new Date().toISOString();
 
   views.sort((a, b) => {
@@ -849,10 +988,10 @@ async function backfillClosedHistory(
   const closedV4Work = v4ClosedIds.slice(0, MAX_CLOSED_V4);
   const workTotal = closedV3Work.length + closedV4Work.length || 1;
 
-  const publishPartial = (phase: "fast" | "full", msg: string, progress: number) => {
+  const publishPartial = async (phase: "fast" | "full", msg: string, progress: number) => {
     const allViews = [...openViews, ...closedViews];
     const allPnls = [...openPnls, ...closedPnls];
-    publishCache(address, allViews, allPnls, eventsByPosition, phase);
+    await publishCache(address, allViews, allPnls, eventsByPosition, phase);
     void updateJob(jobId, address, {
       status: "ready",
       progress,
@@ -946,7 +1085,7 @@ async function backfillClosedHistory(
 
   const allViews = [...openViews, ...closedViews];
   const allPnls = [...openPnls, ...closedPnls];
-  const result = publishCache(
+  const result = await publishCache(
     address,
     allViews,
     allPnls,
@@ -1115,7 +1254,7 @@ export async function indexAddress(
 
   if (cancelled()) throw new Error("CANCELLED");
 
-  const result = publishCache(address, openViews, openPnls, openEvents, "fast");
+  const result = await publishCache(address, openViews, openPnls, openEvents, "fast");
   const v3Open = openViews.filter((v) => v.protocol === "v3").length;
   const v4Open = openViews.filter((v) => v.protocol === "v4").length;
   const elapsed = Date.now() - t0;
@@ -1220,7 +1359,7 @@ export async function indexAddress(
     }
 
     if (cancelled()) return;
-    publishCache(address, [...openViews], [...openPnls], openEvents, "fast");
+    await publishCache(address, [...openViews], [...openPnls], openEvents, "fast");
     await updateJob(jobId, address, {
       status: "ready",
       progress: 94,
