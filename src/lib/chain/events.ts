@@ -57,7 +57,11 @@ export async function getBlockTimestamp(blockNumber: bigint): Promise<number> {
 }
 
 export async function getLatestBlock(): Promise<bigint> {
-  return getPublicClient().getBlockNumber();
+  return withTimeout(
+    getPublicClient().getBlockNumber(),
+    12_000,
+    "getLatestBlock"
+  );
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, label?: string): Promise<T> {
@@ -105,6 +109,99 @@ type LogLike = {
   };
 };
 
+/**
+ * Blockscout module=logs — works for full history on Alchemy free tier
+ * (Alchemy eth_getLogs free is capped at 10 blocks).
+ *
+ * topic0 = event signature, topic1 = indexed tokenId
+ */
+async function getLogsViaBlockscoutModule(params: {
+  event:
+    | typeof increaseEvent
+    | typeof decreaseEvent
+    | typeof collectEvent
+    | typeof transferEvent;
+  tokenId: bigint;
+  timeoutMs: number;
+}): Promise<LogLike[]> {
+  const npm = getNpmAddress();
+  const INCREASE_TOPIC =
+    "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f";
+  const DECREASE_TOPIC =
+    "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4";
+  const COLLECT_TOPIC =
+    "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01";
+
+  const topic0 =
+    params.event === increaseEvent
+      ? INCREASE_TOPIC
+      : params.event === decreaseEvent
+        ? DECREASE_TOPIC
+        : params.event === collectEvent
+          ? COLLECT_TOPIC
+          : null;
+  if (!topic0) return [];
+
+  const topic1 = "0x" + params.tokenId.toString(16).padStart(64, "0");
+  const url =
+    `${ROBINHOOD.explorer}/api?module=logs&action=getLogs` +
+    `&fromBlock=0&toBlock=latest` +
+    `&address=${npm}` +
+    `&topic0=${topic0}&topic1=${topic1}&topic0_1_opr=and`;
+
+  try {
+    const res = await withTimeout(fetch(url), params.timeoutMs, "bs-logs");
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      status?: string;
+      result?: Array<{
+        data?: string;
+        topics?: string[];
+        transactionHash?: string;
+        transactionIndex?: string;
+        blockNumber?: string;
+        logIndex?: string;
+        timeStamp?: string;
+      }>;
+    };
+    if (json.status === "0" || !Array.isArray(json.result)) return [];
+
+    const logs: LogLike[] = [];
+    for (const l of json.result) {
+      const hex = (l.data ?? "0x").startsWith("0x")
+        ? (l.data ?? "0x").slice(2)
+        : (l.data ?? "");
+      let amount0 = 0n;
+      let amount1 = 0n;
+      // Increase/Decrease: liquidity, amount0, amount1
+      // Collect: recipient, amount0, amount1
+      if (hex.length >= 192) {
+        amount0 = BigInt("0x" + hex.slice(64, 128));
+        amount1 = BigInt("0x" + hex.slice(128, 192));
+      }
+      const bn = l.blockNumber?.startsWith("0x")
+        ? BigInt(l.blockNumber)
+        : BigInt(l.blockNumber ?? 0);
+      const li = l.logIndex?.startsWith("0x")
+        ? Number(BigInt(l.logIndex))
+        : Number(l.logIndex ?? 0);
+      logs.push({
+        blockNumber: bn,
+        transactionHash: (l.transactionHash ?? "0x") as Hex,
+        logIndex: li,
+        args: { amount0, amount1 },
+      });
+    }
+    return logs;
+  } catch (e) {
+    console.warn(
+      "[events] blockscout module=logs",
+      e instanceof Error ? e.message.slice(0, 80) : e,
+    );
+    return [];
+  }
+}
+
 async function getLogsOnce(params: {
   event:
     | typeof increaseEvent
@@ -117,28 +214,41 @@ async function getLogsOnce(params: {
   timeoutMs: number;
   extraArgs?: Record<string, unknown>;
 }): Promise<LogLike[]> {
-  const client = getPublicClient();
-  const npm = getNpmAddress();
+  // 1) Blockscout full-history first (Alchemy free eth_getLogs = 10 blocks only)
+  const viaBs = await getLogsViaBlockscoutModule({
+    event: params.event,
+    tokenId: params.tokenId,
+    timeoutMs: Math.max(params.timeoutMs, 12_000),
+  });
+  if (viaBs.length) return viaBs;
+
+  // 2) Legacy transfer→tx-logs path
+  const viaXfer = await getLogsViaBlockscout({
+    ...params,
+    timeoutMs: Math.max(params.timeoutMs, 12_000),
+  });
+  if (viaXfer.length) return viaXfer;
+
+  // 3) Last resort: tiny RPC windows (mostly useless on free Alchemy)
   try {
+    const client = getPublicClient();
+    const npm = getNpmAddress();
+    const to = params.toBlock;
+    const from = to > 9n ? to - 9n : 0n;
     const logs = await withTimeout(
       client.getLogs({
         address: npm,
         event: params.event,
         args: { tokenId: params.tokenId, ...params.extraArgs } as never,
-        fromBlock: params.fromBlock,
-        toBlock: params.toBlock,
+        fromBlock: from,
+        toBlock: to,
       }),
-      params.timeoutMs,
+      5_000,
       "getLogs",
     );
     return logs as LogLike[];
-  } catch (e) {
-    console.warn(
-      "[events] getLogs fail — using Blockscout fallback",
-      e instanceof Error ? e.message.slice(0, 80) : e,
-    );
-    // Fallback to Blockscout API (longer timeout — API calls are heavier)
-    return getLogsViaBlockscout({ ...params, timeoutMs: Math.max(params.timeoutMs, 10_000) });
+  } catch {
+    return [];
   }
 }
 
@@ -190,16 +300,21 @@ async function getLogsViaBlockscout(params: {
       if (txs.length) break;
     }
 
-    // Fallback to per-instance API
+    // Fallback to per-instance API (Blockscout v2 field is transaction_hash)
     if (!txs.length) {
       const xferUrl = `${ROBINHOOD.explorer}/api/v2/tokens/${npm}/instances/${tokenId}/transfers`;
       const res = await withTimeout(fetch(xferUrl), params.timeoutMs);
       if (!res.ok) return [];
       const data = (await res.json()) as {
-        items?: Array<{ tx_hash?: string; block_number?: number }>;
+        items?: Array<{
+          tx_hash?: string;
+          transaction_hash?: string;
+          block_number?: number;
+        }>;
       };
       for (const t of data.items ?? []) {
-        if (t.tx_hash) txs.push({ tx_hash: t.tx_hash, block_number: t.block_number ?? 0 });
+        const hash = t.transaction_hash ?? t.tx_hash;
+        if (hash) txs.push({ tx_hash: hash, block_number: t.block_number ?? 0 });
       }
     }
 
@@ -344,9 +459,9 @@ export async function getPositionEvents(
     getTokenMeta(token1),
   ]);
 
-  // FAST: single window, hard timeouts — must finish in a few seconds
-  const lookback = mode === "fast" ? 400_000n : 2_000_000n;
-  const timeoutMs = mode === "fast" ? 4_000 : 10_000;
+  // Smaller windows + chunked getLogs (Alchemy rejects multi-million ranges).
+  const lookback = mode === "fast" ? 300_000n : 2_000_000n;
+  const timeoutMs = mode === "fast" ? 8_000 : 20_000;
   const from = toBlock > lookback ? toBlock - lookback : 1n;
 
   onProgress?.(
@@ -425,7 +540,67 @@ export async function getPositionEvents(
     });
   }
 
-  // If fast found nothing, one more shot with wider window (still no chunk loop)
+  // Prefer Blockscout if RPC returned nothing (common on new chains / rate limits)
+  if (raw.length === 0) {
+    try {
+      const [incBs, decBs, colBs] = await Promise.all([
+        getLogsViaBlockscout({
+          event: increaseEvent,
+          tokenId,
+          timeoutMs: Math.max(timeoutMs, 10_000),
+        }),
+        getLogsViaBlockscout({
+          event: decreaseEvent,
+          tokenId,
+          timeoutMs: Math.max(timeoutMs, 10_000),
+        }),
+        getLogsViaBlockscout({
+          event: collectEvent,
+          tokenId,
+          timeoutMs: Math.max(timeoutMs, 10_000),
+        }),
+      ]);
+      for (const log of incBs) {
+        raw.push({
+          eventType: "increase",
+          blockNumber: log.blockNumber!,
+          txHash: log.transactionHash!,
+          logIndex: log.logIndex ?? 0,
+          amount0Raw: log.args?.amount0 ?? 0n,
+          amount1Raw: log.args?.amount1 ?? 0n,
+        });
+      }
+      for (const log of decBs) {
+        raw.push({
+          eventType: "decrease",
+          blockNumber: log.blockNumber!,
+          txHash: log.transactionHash!,
+          logIndex: log.logIndex ?? 0,
+          amount0Raw: log.args?.amount0 ?? 0n,
+          amount1Raw: log.args?.amount1 ?? 0n,
+        });
+      }
+      for (const log of colBs) {
+        raw.push({
+          eventType: "collect",
+          blockNumber: log.blockNumber!,
+          txHash: log.transactionHash!,
+          logIndex: log.logIndex ?? 0,
+          amount0Raw: log.args?.amount0 ?? 0n,
+          amount1Raw: log.args?.amount1 ?? 0n,
+        });
+      }
+      if (raw.length) {
+        console.log(
+          `[events] blockscout filled #${tokenId} inc/dec/col from explorer (${raw.length})`,
+        );
+      }
+    } catch (e) {
+      console.warn("[events] blockscout batch", e);
+    }
+  }
+
+  // If still nothing in fast mode, one more wider RPC window
   if (mode === "fast" && raw.length === 0) {
     const from2 = toBlock > 1_500_000n ? toBlock - 1_500_000n : 1n;
     const [inc2, col2] = await Promise.all([

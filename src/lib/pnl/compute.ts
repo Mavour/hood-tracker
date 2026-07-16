@@ -48,7 +48,7 @@ export type PositionPnl = {
   /** number of increase events used for cost basis */
   increaseEventCount?: number;
   /** where the deposit came from */
-  costBasisSource?: "mint" | "events" | "missing";
+  costBasisSource?: "mint" | "events" | "missing" | "estimate";
 };
 
 export type MintDeposit = {
@@ -188,6 +188,26 @@ export function computePositionPnl(params: {
   let feePnlEth: number;
   let pricePnlUsd: number;
   let pricePnlEth: number;
+
+  if (costBasisMissing && depositUsd === 0 && depositEth === 0) {
+    // Fallback cost basis when mint/increase events are missing:
+    // open  → current mark
+    // closed → withdrawn + claimed fees (what left the position)
+    const estUsd =
+      (isOpen ? currentValueUsd : 0) +
+      withdrawnUsd +
+      feesCollectedUsd;
+    const estEth =
+      (isOpen ? currentValueEth : 0) +
+      withdrawnEth +
+      feesCollectedEth;
+    if (estUsd > 0 || estEth > 0) {
+      depositUsd = estUsd;
+      depositEth = estEth;
+      costBasisMissing = false;
+      costBasisSource = "estimate";
+    }
+  }
 
   if (costBasisMissing) {
     // Cannot compute PnL without deposit (doc: PnL = (current + unclaimed) - deposit).

@@ -25,7 +25,7 @@ export const robinhoodChain: Chain = {
   },
 };
 
-const RPC_TIMEOUT_MS = 20_000;
+const RPC_TIMEOUT_MS = 45_000;
 
 /**
  * Same priority as unicrit `config.rpc[4663]`:

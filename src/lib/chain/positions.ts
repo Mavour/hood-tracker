@@ -124,10 +124,11 @@ async function listNpmTokenIdsAlchemy(owner: Address): Promise<bigint[] | null> 
             contractAddresses: [npm],
             withMetadata: false,
             omitMetadata: true,
+            pageSize: 100,
           },
         ],
       }),
-      signal: AbortSignal.timeout(4_000),
+      signal: AbortSignal.timeout(8_000),
     });
     if (!res.ok) return null;
     const json = (await res.json()) as {
@@ -145,13 +146,15 @@ async function listNpmTokenIdsAlchemy(owner: Address): Promise<bigint[] | null> 
       const raw = n.id?.tokenId ?? n.tokenId;
       if (raw != null) {
         try {
-          ids.push(BigInt(raw));
+          ids.push(BigInt(raw.startsWith("0x") ? raw : raw));
         } catch {
           /* skip */
         }
       }
     }
     console.log(`[nft] alchemy_getNFTs → ${ids.length} for ${owner.slice(0, 10)}…`);
+    // Empty array means "API worked but no NFTs" — still valid.
+    // null only when API failed (caller falls back to enumerable).
     return ids;
   } catch (e) {
     console.warn("[nft] alchemy", e instanceof Error ? e.message : e);
@@ -162,7 +165,8 @@ async function listNpmTokenIdsAlchemy(owner: Address): Promise<bigint[] | null> 
 /** List NPM NFT token IDs currently owned by address. */
 export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
   const viaAlchemy = await listNpmTokenIdsAlchemy(owner);
-  if (viaAlchemy) return viaAlchemy;
+  // Prefer Alchemy when it returns a list (including empty). Fall back only on API failure.
+  if (viaAlchemy !== null && viaAlchemy.length > 0) return viaAlchemy;
 
   const client = getPublicClient();
   const npm = getNpmAddress();
@@ -176,8 +180,9 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
   const ids: bigint[] = [];
   const n = Number(bal);
   // Cap enumerate for pathological wallets
-  const limit = Math.min(n, 50);
-  const CHUNK = 10;
+  const limit = Math.min(n, 100);
+  console.log(`[nft] balanceOf=${n} enumerating ${limit}`);
+  const CHUNK = 12;
   for (let i = 0; i < limit; i += CHUNK) {
     const slice = Array.from({ length: Math.min(CHUNK, limit - i) }, (_, j) =>
       client.readContract({
@@ -189,6 +194,14 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
     );
     const batch = await Promise.all(slice);
     ids.push(...batch);
+  }
+
+  // Merge Alchemy + enumerable if Alchemy returned something incomplete
+  if (viaAlchemy && viaAlchemy.length) {
+    const set = new Set(ids.map((x) => x.toString()));
+    for (const id of viaAlchemy) {
+      if (!set.has(id.toString())) ids.push(id);
+    }
   }
   return ids;
 }

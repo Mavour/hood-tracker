@@ -84,7 +84,9 @@ export function Dashboard({ address }: { address: string }) {
         // Soft banner while phase-2 backfill runs
         if (
           typeof data.progressMessage === "string" &&
-          data.progressMessage.includes("background")
+          /backfill|background|history|closed|enrich|stubs/i.test(
+            data.progressMessage,
+          )
         ) {
           setProgressMsg(data.progressMessage);
         } else if (
@@ -93,6 +95,8 @@ export function Dashboard({ address }: { address: string }) {
             data.positions.some((p: { historyPending?: boolean }) => p.historyPending))
         ) {
           setProgressMsg("History for closed positions loading in background…");
+        } else if (data.progress != null && Number(data.progress) < 100) {
+          setProgressMsg(String(data.progressMessage || "Finishing history…"));
         } else {
           setProgressMsg("");
         }
@@ -177,7 +181,15 @@ export function Dashboard({ address }: { address: string }) {
 
             if (jd.status === "ready") {
               await loadPnl();
-              return;
+              // Don't stop early while phase-2 backfill is still running
+              const msg = String(jd.progressMessage ?? "");
+              const pct = Number(jd.progress) || 0;
+              const stillBg =
+                pct < 100 ||
+                /backfill|background|history|closed|enrich/i.test(msg);
+              if (!stillBg) return;
+              // keep polling so closed history lands in UI
+              continue;
             }
             if (jd.status === "error") {
               setError(jd.errorMessage ?? "Indexing failed");
@@ -229,15 +241,16 @@ export function Dashboard({ address }: { address: string }) {
     };
   }, [address, runTrack]);
 
-  // After first ready, keep polling cache briefly so phase-2 calendar/history appears
+  // After first ready, keep polling cache so phase-2 closed history appears
   useEffect(() => {
     if (!summary || !computedAt) return;
     let n = 0;
     const id = setInterval(() => {
       n += 1;
       void loadPnl();
-      if (n >= 24) clearInterval(id); // ~2 min @ 5s
-    }, 5_000);
+      // ~5 min @ 4s — enough for 30 closed NFTs with Alchemy
+      if (n >= 75) clearInterval(id);
+    }, 4_000);
     return () => clearInterval(id);
   }, [summary, computedAt, loadPnl]);
 

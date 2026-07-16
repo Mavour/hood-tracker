@@ -12,6 +12,7 @@ import { isAddress } from "viem";
 import {
   getLatestBlock,
   getPositionEvents,
+  getBlockTimestamp,
   type PositionEvent,
 } from "../chain/events";
 import { setV3TransferCache } from "../chain/events";
@@ -49,6 +50,16 @@ import {
 import { ROBINHOOD } from "@config/contracts";
 import { isIndexCancelled } from "./cancel";
 
+function withTimeout<T>(p: Promise<T>, ms: number, label = ""): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timeout${label ? ` ${label}` : ""}`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
 export type PositionView = PositionPnl & {
   protocol: "v3" | "v4";
   poolAddress: string | null;
@@ -57,6 +68,8 @@ export type PositionView = PositionPnl & {
   token1: string;
   symbol0: string;
   symbol1: string;
+  decimals0: number;
+  decimals1: number;
   fee: number;
   tickLower: number;
   tickUpper: number;
@@ -263,7 +276,10 @@ async function buildOnePosition(
   const raw = livePos ?? (await readPosition(tokenId).catch(() => null));
   if (!raw) return null;
 
-  const isOpen = !!(livePos && livePos.liquidity > 0n);
+  // Open if either live mark or raw positions() still has liquidity.
+  // Previously required livePos — so failed getLivePosition dropped open V3 rows.
+  const liq = livePos?.liquidity ?? raw.liquidity;
+  const isOpen = liq > 0n;
   const token0 = raw.token0;
   const token1 = raw.token1;
   const fee = raw.fee;
@@ -277,27 +293,27 @@ async function buildOnePosition(
     livePos?.poolAddress ?? (await resolvePool(token0, token1, fee));
 
   let events: PositionEvent[] = [];
-    if (opts.fetchEvents) {
-      try {
-        // Scan only recent history for open (8s), full range for closed (15s)
-        const scanFrom = isOpen ? (latest > 3_000_000n ? latest - 3_000_000n : 1n) : 1n;
-        const budget = isOpen ? 8_000 : 15_000;
-        events = await Promise.race([
-          getPositionEvents(
-            tokenId,
-            scanFrom,
-            latest,
-            token0,
-            token1,
-            undefined,
-            { mode: "fast" },
-          ),
-          new Promise<PositionEvent[]>((r) => setTimeout(() => r([]), budget)),
-        ]);
-      } catch (e) {
-        console.warn("[index] events", tokenId.toString(), e);
-      }
+  if (opts.fetchEvents) {
+    try {
+      // Closed needs full event set (increase/decrease/collect); open can be fast.
+      const mode = isOpen ? "fast" : "full";
+      const budget = isOpen ? 10_000 : 20_000;
+      events = await Promise.race([
+        getPositionEvents(
+          tokenId,
+          1n,
+          latest,
+          token0,
+          token1,
+          undefined,
+          { mode },
+        ),
+        new Promise<PositionEvent[]>((r) => setTimeout(() => r([]), budget)),
+      ]);
+    } catch (e) {
+      console.warn("[index] events", tokenId.toString(), e);
     }
+  }
 
   const priced = await priceEventsAtBlocks(
     events,
@@ -367,9 +383,8 @@ async function buildOnePosition(
   );
   const costBasisEstimated = !hasIncrease && !mintDeposit;
 
-  // Closed with no events yet → skip noise rows in fast phase
-  if (!isOpen && priced.length === 0 && opts.historyPending) {
-    // Keep a lightweight closed stub so count is visible
+  // Closed with no events yet → still show a row (never drop from UI).
+  if (!isOpen && priced.length === 0) {
     const stubPnl = computePositionPnl({
       tokenId: tokenId.toString(),
       events: [],
@@ -383,6 +398,8 @@ async function buildOnePosition(
       token1,
       symbol0: livePos?.symbol0 ?? meta0.symbol,
       symbol1: livePos?.symbol1 ?? meta1.symbol,
+      decimals0: meta0.decimals,
+      decimals1: meta1.decimals,
       fee,
       tickLower: raw.tickLower,
       tickUpper: raw.tickUpper,
@@ -392,14 +409,12 @@ async function buildOnePosition(
       liquidity: "0",
       explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.npm}/instance/${tokenId}`,
       costBasisEstimated: true,
-      historyPending: true,
+      historyPending: opts.historyPending || !opts.fetchEvents,
       realizedPnlUsd: 0,
       unrealizedPnlUsd: 0,
     };
     return { view, pnl: stubPnl, priced: [] };
   }
-
-  if (!isOpen && priced.length === 0 && !livePos) return null;
 
   let openedTs: number | null = null;
   let closedTs: number | null = null;
@@ -497,6 +512,8 @@ async function buildOnePosition(
     token1,
     symbol0: livePos?.symbol0 ?? meta0.symbol,
     symbol1: livePos?.symbol1 ?? meta1.symbol,
+    decimals0: meta0.decimals,
+    decimals1: meta1.decimals,
     fee,
     tickLower: raw.tickLower,
     tickUpper: raw.tickUpper,
@@ -505,7 +522,7 @@ async function buildOnePosition(
     amount1Human: livePos?.amount1Human ?? 0,
     liquidity: (livePos?.liquidity ?? raw.liquidity).toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.npm}/instance/${tokenId}`,
-    costBasisEstimated: costBasisEstimated || Boolean(pnl.costBasisMissing),
+    costBasisEstimated: costBasisEstimated || Boolean(pnl.costBasisMissing) || pnl.costBasisSource === "estimate",
     historyPending: opts.historyPending,
     realizedPnlUsd: isOpen ? 0 : pnl.netPnlUsd,
     unrealizedPnlUsd: isOpen ? pnl.netPnlUsd : 0,
@@ -534,9 +551,56 @@ async function buildOneV4Position(
   let events: PositionEvent[] = [];
   if (fetchEvents) {
     try {
-      events = await getV4PositionEvents(vp, vp.owner);
+      events = await getV4PositionEvents(vp, vp.owner, vp.token0, vp.token1, vp.poolId);
     } catch (e) {
       console.warn("[v4] events", vp.tokenId.toString(), e);
+    }
+  }
+
+  // Convert raw→human amounts and fix timestamps from block numbers
+  if (events.length) {
+    const blockSet = [...new Set(events.map((e) => e.blockNumber.toString()))];
+    const tsMap = new Map<string, number>();
+    const toBlock = latest > 0n ? latest : 1n;
+    let latestTs = Math.floor(Date.now() / 1000);
+    try {
+      latestTs = await withTimeout(getBlockTimestamp(toBlock), 3_000);
+    } catch { /* keep estimate */ }
+
+    const toFetch = blockSet.slice(0, 12);
+    await Promise.all(
+      toFetch.map(async (bn) => {
+        try {
+          tsMap.set(bn, await withTimeout(getBlockTimestamp(BigInt(bn)), 2_500));
+        } catch {
+          const b = BigInt(bn);
+          tsMap.set(
+            bn,
+            Math.max(0, Math.floor(latestTs - Number(toBlock - b) * 0.25)),
+          );
+        }
+      }),
+    );
+    for (const bn of blockSet) {
+      if (!tsMap.has(bn)) {
+        const b = BigInt(bn);
+        tsMap.set(
+          bn,
+          Math.max(0, Math.floor(latestTs - Number(toBlock - b) * 0.25)),
+        );
+      }
+    }
+
+    for (const e of events) {
+      if (e.amount0 === 0 && e.amount0Raw !== 0n) {
+        e.amount0 = humanAmount(e.amount0Raw, vp.decimals0);
+      }
+      if (e.amount1 === 0 && e.amount1Raw !== 0n) {
+        e.amount1 = humanAmount(e.amount1Raw, vp.decimals1);
+      }
+      if (e.timestamp === 0 && e.blockNumber > 0n) {
+        e.timestamp = tsMap.get(e.blockNumber.toString()) ?? 0;
+      }
     }
   }
 
@@ -595,11 +659,6 @@ async function buildOneV4Position(
     unclaimedFeesEth = fees.eth;
   }
 
-  // V4 ModifyLiquidity often has 0 token amounts → cost basis may be missing
-  const hasIncrease = priced.some(
-    (e) => e.eventType === "increase" && (e.amount0 > 0 || e.amount1 > 0),
-  );
-
   const pnl = computePositionPnl({
     tokenId: vp.tokenId.toString(),
     events: priced,
@@ -620,6 +679,8 @@ async function buildOneV4Position(
     token1: vp.token1,
     symbol0: vp.symbol0,
     symbol1: vp.symbol1,
+    decimals0: vp.decimals0,
+    decimals1: vp.decimals1,
     fee: vp.fee,
     tickLower: vp.tickLower,
     tickUpper: vp.tickUpper,
@@ -628,7 +689,7 @@ async function buildOneV4Position(
     amount1Human: vp.amount1Human,
     liquidity: vp.liquidity.toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.v4PositionManager}/instance/${vp.tokenId}`,
-    costBasisEstimated: !mintDeposit && (!hasIncrease || Boolean(pnl.costBasisMissing)),
+    costBasisEstimated: pnl.costBasisSource !== "mint" && pnl.costBasisSource !== "estimate",
     hasCustomHook: vp.hasCustomHook,
     realizedPnlUsd: isOpen ? 0 : pnl.netPnlUsd,
     unrealizedPnlUsd: isOpen ? pnl.netPnlUsd : 0,
@@ -717,17 +778,49 @@ async function backfillClosedHistory(
   const closedPnls: PositionPnl[] = [];
   const eventsByPosition = new Map(openEvents);
 
+  // Cap heavy closed backfill so wallets with 50+ NFTs still finish.
+  const MAX_CLOSED_V3 = 30;
+  const MAX_CLOSED_V4 = 20;
+  const closedV3Work = closedIds.slice(0, MAX_CLOSED_V3);
+  const closedV4Work = v4ClosedIds.slice(0, MAX_CLOSED_V4);
+  const workTotal = closedV3Work.length + closedV4Work.length || 1;
+
+  const publishPartial = (phase: "fast" | "full", msg: string, progress: number) => {
+    const allViews = [...openViews, ...closedViews];
+    const allPnls = [...openPnls, ...closedPnls];
+    publishCache(address, allViews, allPnls, eventsByPosition, phase);
+    void updateJob(jobId, address, {
+      status: "ready",
+      progress,
+      progressMessage: msg,
+    });
+  };
+
+  // Immediate stubs so Closed section is not empty while events load
+  if (closedV3Work.length) {
+    await mapPool(closedV3Work, 6, async (tokenId) => {
+      if (isIndexCancelled(address, gen)) return;
+      const livePos = liveMap.get(tokenId.toString()) ?? null;
+      const built = await buildOnePosition(tokenId, owner, latest, livePos, {
+        fetchEvents: false,
+        historyPending: true,
+      }).catch(() => null);
+      if (built) {
+        closedViews.push(built.view);
+        closedPnls.push(built.pnl);
+      }
+    });
+    publishPartial(
+      "fast",
+      `Showing ${closedViews.length} closed stubs — loading history…`,
+      93,
+    );
+  }
+
   let done = 0;
-  await mapPool(closedIds, 2, async (tokenId) => {
+  await mapPool(closedV3Work, 5, async (tokenId) => {
     if (isIndexCancelled(address, gen)) return;
     done += 1;
-    if (done % 3 === 0 || done === closedIds.length) {
-      await updateJob(jobId, address, {
-        status: "ready",
-        progress: 92 + Math.floor((done / totalClosed) * 7),
-        progressMessage: `Backfilling V3 history ${done}/${closedIds.length}…`,
-      });
-    }
 
     const livePos = liveMap.get(tokenId.toString()) ?? null;
     const built = await buildOnePosition(tokenId, owner, latest, livePos, {
@@ -736,27 +829,35 @@ async function backfillClosedHistory(
     }).catch(() => null);
 
     if (built) {
-      closedViews.push(built.view);
-      closedPnls.push(built.pnl);
-      eventsByPosition.set(tokenId.toString(), built.priced);
+      const idStr = tokenId.toString();
+      const idx = closedViews.findIndex(
+        (v) => v.protocol === "v3" && v.tokenId === idStr,
+      );
+      const pIdx = closedPnls.findIndex((p) => p.tokenId === idStr);
+      if (idx >= 0) closedViews[idx] = built.view;
+      else closedViews.push(built.view);
+      if (pIdx >= 0) closedPnls[pIdx] = built.pnl;
+      else closedPnls.push(built.pnl);
+      eventsByPosition.set(idStr, built.priced);
+    }
+
+    if (done % 4 === 0 || done === closedV3Work.length) {
+      publishPartial(
+        "fast",
+        `Backfilling V3 history ${done}/${closedV3Work.length}…`,
+        93 + Math.floor((done / workTotal) * 6),
+      );
     }
   });
 
   if (isIndexCancelled(address, gen)) return;
 
   // V4 closed positions
-  if (v4ClosedIds.length) {
+  if (closedV4Work.length) {
     let v4Done = 0;
-    await mapPool(v4ClosedIds, 2, async (tokenId) => {
+    await mapPool(closedV4Work, 4, async (tokenId) => {
       if (isIndexCancelled(address, gen)) return;
       v4Done += 1;
-      if (v4Done % 2 === 0 || v4Done === v4ClosedIds.length) {
-        await updateJob(jobId, address, {
-          status: "ready",
-          progress: 92 + Math.floor(((closedIds.length + v4Done) / totalClosed) * 7),
-          progressMessage: `Backfilling V4 history ${v4Done}/${v4ClosedIds.length}…`,
-        });
-      }
 
       const vp = await getLiveV4Position(tokenId, owner).catch(() => null);
       if (!vp) return;
@@ -765,6 +866,14 @@ async function backfillClosedHistory(
         closedViews.push(built.view);
         closedPnls.push(built.pnl);
         eventsByPosition.set(`v4:${tokenId}`, built.priced);
+      }
+
+      if (v4Done % 3 === 0 || v4Done === closedV4Work.length) {
+        publishPartial(
+          "fast",
+          `Backfilling V4 history ${v4Done}/${closedV4Work.length}…`,
+          93 + Math.floor(((closedV3Work.length + v4Done) / workTotal) * 6),
+        );
       }
     });
   }
@@ -788,7 +897,8 @@ async function backfillClosedHistory(
   });
 
   console.log(
-    `[index] phase2 done days=${result.daily.length} closed=${closedViews.length}`,
+    `[index] phase2 done days=${result.daily.length} closed=${closedViews.length} ` +
+      `(v3 work ${closedV3Work.length}/${closedIds.length}, v4 work ${closedV4Work.length}/${v4ClosedIds.length})`,
   );
 }
 
@@ -813,8 +923,8 @@ export async function indexAddress(
   const owner = address as Address;
   const cancelled = () => isIndexCancelled(address, gen);
   const t0 = Date.now();
-  /** Hard budget for first paint (first scan, no cache). */
-  const PHASE1_MS = 8_000;
+  /** Hard budget for first paint (first scan, no cache). Increased significantly for unreliable public RPC. */
+  const PHASE1_MS = 25_000;
   const deadline = t0 + PHASE1_MS;
   const timeLeft = () => Math.max(0, deadline - Date.now());
   const ok = () => !cancelled() && Date.now() < deadline;
@@ -828,14 +938,14 @@ export async function indexAddress(
     });
   };
 
-  await checkpoint(5, "First scan — live open only (max ~10s)…");
+  await checkpoint(5, "First scan — live open only (max ~15s, increased RPC timeout)…");
 
   let latest = 0n;
   try {
     latest = await Promise.race([
       getLatestBlock(),
       new Promise<bigint>((_, rej) =>
-        setTimeout(() => rej(new Error("block timeout")), 3_000),
+        setTimeout(() => rej(new Error("block timeout")), 15_000),
       ),
     ]);
   } catch (e) {
@@ -850,32 +960,34 @@ export async function indexAddress(
   await checkpoint(20, "Listing owned LP NFTs…");
   let heldIds: bigint[] = [];
   try {
-    heldIds = await Promise.race([
-      listNpmTokenIds(owner),
-      new Promise<bigint[]>((r) => setTimeout(() => r([]), 4_000)),
-    ]);
+    heldIds = await withTimeout(listNpmTokenIds(owner), 18_000, "listNpmTokenIds");
   } catch (e) {
     console.warn("[index] listNpm", e);
   }
+  console.log(`[index] held V3 NFTs=${heldIds.length}`);
   if (cancelled()) throw new Error("CANCELLED");
 
   // 2) Light filter: only read positions() for liquidity (skip closed detail)
   await checkpoint(35, `Filtering open among ${heldIds.length}…`);
   const openIds: bigint[] = [];
   const closedHeldIds: bigint[] = [];
-  await mapPool(heldIds, 4, async (tokenId) => {
-    if (!ok()) return;
+  // Don't hard-abort on PHASE1 deadline here — partial open/closed lists still useful
+  await mapPool(heldIds, 8, async (tokenId) => {
+    if (cancelled()) return;
     const raw = await readPosition(tokenId).catch(() => null);
     if (!raw) return;
     if (raw.liquidity > 0n) openIds.push(tokenId);
     else closedHeldIds.push(tokenId);
   });
+  console.log(
+    `[index] filter open=${openIds.length} closedHeld=${closedHeldIds.length}`,
+  );
 
   // 3) Full live mark for open (typically 1–5) — fee growth ON, events in bg
   await checkpoint(
     55,
     openIds.length
-      ? `Live mark ${openIds.length} open…`
+      ? `Live mark ${openIds.length} open V3…`
       : "No open V3…",
   );
 
@@ -884,7 +996,7 @@ export async function indexAddress(
     NonNullable<Awaited<ReturnType<typeof getLivePosition>>>
   >();
   await mapPool(openIds, 6, async (tokenId) => {
-    if (!ok()) return;
+    if (cancelled()) return;
     const p = await getLivePosition(tokenId, owner).catch(() => null);
     if (p) liveMap.set(tokenId.toString(), p);
   });
@@ -893,13 +1005,17 @@ export async function indexAddress(
   const openPnls: PositionPnl[] = [];
   const openEvents = new Map<string, PricedEvent[]>();
 
-  await mapPool(openIds, 4, async (tokenId) => {
-    if (!ok()) return;
+  // Always build open V3 from raw positions() even if live mark failed
+  await mapPool(openIds, 6, async (tokenId) => {
+    if (cancelled()) return;
     const livePos = liveMap.get(tokenId.toString()) ?? null;
     const built = await buildOnePosition(tokenId, owner, latest, livePos, {
       fetchEvents: false, // NEVER on first paint
       historyPending: false,
-    }).catch(() => null);
+    }).catch((e) => {
+      console.warn("[index] build open v3", tokenId.toString(), e);
+      return null;
+    });
     if (built) {
       openViews.push(built.view);
       openPnls.push(built.pnl);
@@ -912,9 +1028,9 @@ export async function indexAddress(
     await checkpoint(75, "V4 open (if any)…");
     try {
       const v4Live = await Promise.race([
-        listLiveV4Positions(owner),
+        withTimeout(listLiveV4Positions(owner), Math.min(15_000, timeLeft()), "listLiveV4"),
         new Promise<LiveV4Position[]>((r) =>
-          setTimeout(() => r([]), Math.min(3_000, timeLeft())),
+          setTimeout(() => r([]), Math.min(6_000, timeLeft())),
         ),
       ]);
       for (const vp of v4Live) {
@@ -961,10 +1077,15 @@ export async function indexAddress(
       const res = await fetch(url);
       if (res.ok) {
         const data = (await res.json()) as {
-          items?: Array<{ tx_hash?: string; block_number?: number; total?: { token_id?: string } }>;
+          items?: Array<{
+            tx_hash?: string;
+            transaction_hash?: string;
+            block_number?: number;
+            total?: { token_id?: string };
+          }>;
         };
         const items = (data.items ?? []).map((t) => ({
-          tx_hash: t.tx_hash ?? "",
+          tx_hash: t.transaction_hash ?? t.tx_hash ?? "",
           block_number: t.block_number ?? 0,
           tokenId: t.total?.token_id ?? "0",
         }));
@@ -974,7 +1095,7 @@ export async function indexAddress(
     } catch { /* ignore */ }
 
     // Enrich open V3 with Increase + Collect (claimed fees + cost basis)
-    await mapPool(openIds, 2, async (tokenId) => {
+    await mapPool(openIds, 4, async (tokenId) => {
       if (cancelled()) return;
       const live2 = await getLivePosition(tokenId, owner).catch(() => null);
       const built = await buildOnePosition(tokenId, owner, latest, live2, {

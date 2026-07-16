@@ -56,26 +56,111 @@ async function findMintTxHash(
   // 1) Blockscout explorer API — fast, handles all edge cases
   try {
     const url = `${ROBINHOOD.explorer}/api/v2/tokens/${manager}/instances/${tokenId}/transfers`;
-    const res = await withTimeout(fetch(url), 6_000);
+    const res = await withTimeout(fetch(url), 8_000);
     if (res.ok) {
       const data = (await res.json()) as {
         items?: Array<{
           tx_hash?: string;
+          transaction_hash?: string;
           block_number?: number;
           type?: string;
+          from?: { hash?: string };
+          to?: { hash?: string };
+          timestamp?: string;
         }>;
       };
-      const mintTx = data.items?.find((t) => t.type === "token_minting");
-      if (mintTx?.tx_hash) {
+      const items = data.items ?? [];
+      // Prefer explicit minting type; else earliest transfer from zero address
+      const mintTx =
+        items.find((t) => t.type === "token_minting") ??
+        items.find(
+          (t) =>
+            (t.from?.hash ?? "").toLowerCase() ===
+            "0x0000000000000000000000000000000000000000",
+        ) ??
+        // last resort: oldest item (API usually newest-first)
+        (items.length ? items[items.length - 1] : undefined);
+      // Blockscout v2 uses transaction_hash (not tx_hash)
+      const hash = mintTx?.transaction_hash ?? mintTx?.tx_hash;
+      if (hash) {
         return {
-          txHash: mintTx.tx_hash as Hex,
-          blockNumber: BigInt(mintTx.block_number ?? 0),
+          txHash: hash as Hex,
+          blockNumber: BigInt(mintTx?.block_number ?? 0),
         };
       }
     }
   } catch (e) {
     console.warn("[mint] explorer API", e instanceof Error ? e.message : e);
   }
+
+  // 2) Alchemy getAssetTransfers — mint is transfer from 0x0
+  try {
+    const { getRpcUrl } = await import("./client");
+    const rpc = getRpcUrl();
+    if (rpc.includes("alchemy")) {
+      const res = await withTimeout(
+        fetch(rpc, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "alchemy_getAssetTransfers",
+            params: [
+              {
+                fromBlock: "0x0",
+                toBlock: "latest",
+                contractAddresses: [manager],
+                category: ["erc721"],
+                withMetadata: true,
+                maxCount: "0x3e8",
+                order: "asc",
+              },
+            ],
+          }),
+        }),
+        10_000,
+      );
+      if (res.ok) {
+        const json = (await res.json()) as {
+          result?: {
+            transfers?: Array<{
+              hash?: string;
+              blockNum?: string;
+              tokenId?: string;
+              erc721TokenId?: string;
+              from?: string;
+            }>;
+          };
+        };
+        const idHex = "0x" + tokenId.toString(16);
+        const idDec = tokenId.toString();
+        const hit = (json.result?.transfers ?? []).find((t) => {
+          const tid = (t.tokenId ?? t.erc721TokenId ?? "").toLowerCase();
+          const match =
+            tid === idHex.toLowerCase() ||
+            tid === idDec ||
+            (() => {
+              try {
+                return BigInt(tid).toString() === idDec;
+              } catch {
+                return false;
+              }
+            })();
+          return match;
+        });
+        if (hit?.hash) {
+          return {
+            txHash: hit.hash as Hex,
+            blockNumber: BigInt(hit.blockNum ?? "0x0"),
+          };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[mint] alchemy transfers", e instanceof Error ? e.message : e);
+  }
+
   return null;
 }
 
@@ -342,6 +427,32 @@ async function computeV4HistoricalDeposit(params: {
   txHash: Hex;
 }): Promise<MintDeposit | null> {
   const { poolId, tickLower, tickUpper, liquidity, blockNumber, txHash } = params;
+  const am = await getV4HistoricalAmounts(poolId, tickLower, tickUpper, liquidity, blockNumber);
+  if (!am || (am.amount0 === 0n && am.amount1 === 0n)) return null;
+  return {
+    protocol: "v4",
+    amount0: am.amount0,
+    amount1: am.amount1,
+    blockNumber,
+    txHash,
+    source: "mint",
+  };
+}
+
+/**
+ * Shared helper: get token amounts for V4 liquidity at a specific historical block.
+ * Calls StateView.getSlot0 at the given blockNumber, then computes amounts via
+ * getAmountsForLiquidity. Returns null on failure.
+ * Used by both mint deposit resolution and event amount computation.
+ */
+export async function getV4HistoricalAmounts(
+  poolId: Hex,
+  tickLower: number,
+  tickUpper: number,
+  liquidity: bigint,
+  blockNumber: bigint,
+): Promise<{ amount0: bigint; amount1: bigint } | null> {
+  if (liquidity === 0n) return { amount0: 0n, amount1: 0n };
   try {
     const { stateViewAbi } = await import("./v4/abis");
     const { getV4StateView } = await import("./v4/positions");
@@ -357,27 +468,11 @@ async function computeV4HistoricalDeposit(params: {
       blockNumber,
     });
     const sqrtPriceX96 = slot0[0] as bigint;
-    const am = getAmountsForLiquidity(
-      sqrtPriceX96,
-      tickLower,
-      tickUpper,
-      liquidity,
-    );
-
-    if (am.amount0 > 0n || am.amount1 > 0n) {
-      return {
-        protocol: "v4",
-        amount0: am.amount0,
-        amount1: am.amount1,
-        blockNumber,
-        txHash,
-        source: "mint",
-      };
-    }
+    return getAmountsForLiquidity(sqrtPriceX96, tickLower, tickUpper, liquidity);
   } catch (e) {
-    console.warn("[mint] v4 historical", e instanceof Error ? e.message : e);
+    console.warn("[v4 amounts]", e instanceof Error ? e.message : e);
+    return null;
   }
-  return null;
 }
 
 async function resolveV4MintDepositFallback(params: {

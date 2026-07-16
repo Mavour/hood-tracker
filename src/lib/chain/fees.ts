@@ -21,7 +21,13 @@ export function feesFromGrowth(
   if (delta < 0n) {
     delta = (1n << 256n) + delta;
   }
-  return (liquidity * delta) / Q128;
+  const raw = (liquidity * delta) / Q128;
+  // Sanity cap: fees can never realistically exceed 10× the position's total
+  // liquidity. When non-atomic RPC reads cause inconsistent feeGrowthInside
+  // values, the result can be astronomically large (~2^256). In Solidity this
+  // would be truncated to uint128, but BigInt has no truncation.
+  if (raw > liquidity * 10n) return 0n;
+  return raw;
 }
 
 export function feeGrowthInside(

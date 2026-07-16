@@ -18,6 +18,7 @@ export function formatUsd(n: number, digits = 2): string {
   if (!Number.isFinite(n)) return "$0.00";
   const sign = n < 0 ? "-" : "";
   const a = Math.abs(n);
+  if (a >= 1_000_000_000) return `${sign}$${(a / 1_000_000_000).toFixed(2)}B`;
   if (a >= 1_000_000) return `${sign}$${(a / 1_000_000).toFixed(2)}M`;
   if (a >= 1_000) return `${sign}$${(a / 1_000).toFixed(2)}k`;
   if (a >= 1) return `${sign}$${a.toFixed(digits)}`;
@@ -39,7 +40,12 @@ export function formatEth(n: number, digits = 4): string {
 export function formatPct(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const sign = n >= 0 ? "+" : "";
-  return `${sign}${n.toFixed(2)}%`;
+  const s = n.toFixed(2);
+  if (s.includes("e")) {
+    if (Math.abs(n) >= 1e6) return `${sign}999999%`;
+    return `${sign}${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;
+  }
+  return `${sign}${s}%`;
 }
 
 export function formatSigned(
