@@ -4,6 +4,7 @@ import { npmAbi, factoryAbi, poolAbi, erc20Abi } from "./abis";
 import { getPublicClient } from "./client";
 import { getAmountsForLiquidity, humanAmount } from "./math";
 import { computeV3UnclaimedFees } from "./fees";
+import { throttled } from "./rpc-throttle";
 
 export type PositionRaw = {
   tokenId: bigint;
@@ -77,13 +78,11 @@ export async function getTokenMeta(address: Address): Promise<TokenMeta> {
 
   const client = getPublicClient();
   try {
-    const [symbol, decimals, name] = await Promise.all([
-      client.readContract({ address, abi: erc20Abi, functionName: "symbol" }),
-      client.readContract({ address, abi: erc20Abi, functionName: "decimals" }),
-      client
-        .readContract({ address, abi: erc20Abi, functionName: "name" })
-        .catch(() => "Token"),
-    ]);
+    const symbol = await throttled(() => client.readContract({ address, abi: erc20Abi, functionName: "symbol" }));
+    const decimals = await throttled(() => client.readContract({ address, abi: erc20Abi, functionName: "decimals" }));
+    const name = await throttled(() => client
+      .readContract({ address, abi: erc20Abi, functionName: "name" })
+      .catch(() => "Token"));
     const m: TokenMeta = {
       address,
       symbol: String(symbol),
@@ -170,12 +169,12 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
 
   const client = getPublicClient();
   const npm = getNpmAddress();
-  const bal = await client.readContract({
+  const bal = await throttled(() => client.readContract({
     address: npm,
     abi: npmAbi,
     functionName: "balanceOf",
     args: [owner],
-  });
+  }));
 
   const ids: bigint[] = [];
   const n = Number(bal);
@@ -185,12 +184,12 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
   const CHUNK = 12;
   for (let i = 0; i < limit; i += CHUNK) {
     const slice = Array.from({ length: Math.min(CHUNK, limit - i) }, (_, j) =>
-      client.readContract({
+      throttled(() => client.readContract({
         address: npm,
         abi: npmAbi,
         functionName: "tokenOfOwnerByIndex",
         args: [owner, BigInt(i + j)],
-      }),
+      })),
     );
     const batch = await Promise.all(slice);
     ids.push(...batch);
@@ -210,12 +209,12 @@ export async function readPosition(tokenId: bigint): Promise<PositionRaw | null>
   const client = getPublicClient();
   const npm = getNpmAddress();
   try {
-    const pos = await client.readContract({
+    const pos = await throttled(() => client.readContract({
       address: npm,
       abi: npmAbi,
       functionName: "positions",
       args: [tokenId],
-    });
+    }));
     return {
       tokenId,
       token0: pos[2] as Address,
@@ -242,12 +241,12 @@ export async function resolvePool(
   const client = getPublicClient();
   const factory = getFactoryAddress();
   try {
-    const pool = await client.readContract({
+    const pool = await throttled(() => client.readContract({
       address: factory,
       abi: factoryAbi,
       functionName: "getPool",
       args: [token0, token1, fee],
-    });
+    }));
     if (!pool || pool === "0x0000000000000000000000000000000000000000") return null;
     return pool as Address;
   } catch {
@@ -279,11 +278,11 @@ export async function getLivePosition(
   if (poolAddress && raw.liquidity > 0n) {
     const client = getPublicClient();
     try {
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: poolAddress,
         abi: poolAbi,
         functionName: "slot0",
-      });
+      }));
       sqrtPriceX96 = slot0[0] as bigint;
       currentTick = Number(slot0[1]);
       inRange = currentTick >= raw.tickLower && currentTick < raw.tickUpper;

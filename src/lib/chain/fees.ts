@@ -7,6 +7,7 @@
 import type { Address } from "viem";
 import { poolAbi } from "./abis";
 import { getPublicClient } from "./client";
+import { throttled } from "./rpc-throttle";
 
 const Q128 = 1n << 128n;
 const UINT256_MOD = 2n ** 256n;
@@ -84,30 +85,28 @@ export async function computeV3UnclaimedFees(params: {
 
   const client = getPublicClient();
   try {
-    const [g0, g1, tickL, tickU] = await Promise.all([
-      client.readContract({
-        address: poolAddress,
-        abi: poolAbi,
-        functionName: "feeGrowthGlobal0X128",
-      }),
-      client.readContract({
-        address: poolAddress,
-        abi: poolAbi,
-        functionName: "feeGrowthGlobal1X128",
-      }),
-      client.readContract({
-        address: poolAddress,
-        abi: poolAbi,
-        functionName: "ticks",
-        args: [tickLower],
-      }),
-      client.readContract({
-        address: poolAddress,
-        abi: poolAbi,
-        functionName: "ticks",
-        args: [tickUpper],
-      }),
-    ]);
+    const g0 = await throttled(() => client.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "feeGrowthGlobal0X128",
+    }));
+    const g1 = await throttled(() => client.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "feeGrowthGlobal1X128",
+    }));
+    const tickL = await throttled(() => client.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "ticks",
+      args: [tickLower],
+    }));
+    const tickU = await throttled(() => client.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "ticks",
+      args: [tickUpper],
+    }));
 
     const outside0L = tickL[2] as bigint;
     const outside1L = tickL[3] as bigint;

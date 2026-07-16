@@ -72,8 +72,8 @@ export function getPublicClient(): PublicClient {
   const transports = urls.map((url) =>
     http(url, {
       timeout: RPC_TIMEOUT_MS,
-      retryCount: 1,
-      retryDelay: 500,
+      retryCount: 3,
+      retryDelay: 250,
     }),
   );
 

@@ -17,6 +17,7 @@ import { getPublicClient, getRpcUrl } from "../client";
 import { getAmountsForLiquidity, humanAmount } from "../math";
 import { getTokenMeta } from "../positions";
 import { feesFromGrowth } from "../fees";
+import { throttled } from "../rpc-throttle";
 import {
   poolManagerAbi,
   stateViewAbi,
@@ -230,12 +231,12 @@ export async function listV4TokenIds(owner: Address): Promise<bigint[]> {
     const results = await Promise.all(
       slice.map(async (id) => {
         try {
-          const o = await client.readContract({
+          const o = await throttled(() => client.readContract({
             address: posm,
             abi: v4PositionManagerAbi,
             functionName: "ownerOf",
             args: [id],
-          });
+          }));
           return (o as string).toLowerCase() === ownerLc ? id : null;
         } catch {
           return null;
@@ -263,20 +264,18 @@ async function computeV4UnclaimedFees(params: {
   const salt = pad(toHex(tokenId), { size: 32 });
 
   try {
-    const [inside, posInfo] = await Promise.all([
-      client.readContract({
-        address: stateView,
-        abi: stateViewAbi,
-        functionName: "getFeeGrowthInside",
-        args: [poolId, tickLower, tickUpper],
-      }),
-      client.readContract({
-        address: stateView,
-        abi: stateViewAbi,
-        functionName: "getPositionInfo",
-        args: [poolId, posm, tickLower, tickUpper, salt],
-      }),
-    ]);
+    const inside = await throttled(() => client.readContract({
+      address: stateView,
+      abi: stateViewAbi,
+      functionName: "getFeeGrowthInside",
+      args: [poolId, tickLower, tickUpper],
+    }));
+    const posInfo = await throttled(() => client.readContract({
+      address: stateView,
+      abi: stateViewAbi,
+      functionName: "getPositionInfo",
+      args: [poolId, posm, tickLower, tickUpper, salt],
+    }));
     const last0 = posInfo[1] as bigint;
     const last1 = posInfo[2] as bigint;
     const liq = (posInfo[0] as bigint) || liquidity;
@@ -301,12 +300,12 @@ export async function getLiveV4Position(
   let poolKeyRaw: V4PoolKey;
   let info: bigint;
   try {
-    const res = await client.readContract({
+    const res = await throttled(() => client.readContract({
       address: posm,
       abi: v4PositionManagerAbi,
       functionName: "getPoolAndPositionInfo",
       args: [tokenId],
-    });
+    }));
     const pk = res[0] as {
       currency0: Address;
       currency1: Address;
@@ -329,12 +328,12 @@ export async function getLiveV4Position(
   const { tickLower, tickUpper } = decodeV4PositionInfo(info);
   let liquidity = 0n;
   try {
-    liquidity = (await client.readContract({
+    liquidity = (await throttled(() => client.readContract({
       address: posm,
       abi: v4PositionManagerAbi,
       functionName: "getPositionLiquidity",
       args: [tokenId],
-    })) as bigint;
+    }))) as bigint;
   } catch {
     /* 0 */
   }
@@ -358,12 +357,12 @@ export async function getLiveV4Position(
 
   if (liquidity > 0n) {
     try {
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: stateView,
         abi: stateViewAbi,
         functionName: "getSlot0",
         args: [poolId],
-      });
+      }));
       sqrtPriceX96 = slot0[0] as bigint;
       currentTick = Number(slot0[1]);
       inRange = currentTick >= tickLower && currentTick < tickUpper;

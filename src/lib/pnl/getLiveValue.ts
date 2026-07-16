@@ -15,6 +15,7 @@ import { getTokenPriceLive, getPairPriceLiveFromPool } from "../pricing";
 import { ttlGetOrSet } from "../cache/ttl";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
+import { throttled } from "../chain/rpc-throttle";
 
 export type CachedPositionMeta = {
   tokenId: string;
@@ -68,11 +69,11 @@ async function readSlot0(pool: Address): Promise<{
 }> {
   return ttlGetOrSet(`slot0:${pool.toLowerCase()}`, SLOT0_TTL_MS, async () => {
     const client = getPublicClient();
-    const slot0 = await client.readContract({
+    const slot0 = await throttled(() => client.readContract({
       address: pool,
       abi: poolAbi,
       functionName: "slot0",
-    });
+    }));
     return {
       sqrtPriceX96: slot0[0] as bigint,
       tick: Number(slot0[1]),
@@ -95,12 +96,12 @@ async function readTokensOwed(tokenId: bigint): Promise<{
     async () => {
       const client = getPublicClient();
       const npm = getNpmAddress();
-      const pos = await client.readContract({
+      const pos = await throttled(() => client.readContract({
         address: npm,
         abi: npmAbi,
         functionName: "positions",
         args: [tokenId],
-      });
+      }));
       return {
         liquidity: pos[7] as bigint,
         tokensOwed0: pos[10] as bigint,
@@ -156,12 +157,12 @@ export async function getLiveValue(
         `v4slot0:${poolId.toLowerCase()}`,
         SLOT0_TTL_MS,
         async () => {
-          const s = await client.readContract({
+          const s = await throttled(() => client.readContract({
             address: stateView,
             abi: stateViewAbi,
             functionName: "getSlot0",
             args: [poolId],
-          });
+          }));
           return {
             sqrtPriceX96: s[0] as bigint,
             tick: Number(s[1]),
@@ -185,30 +186,28 @@ export async function getLiveValue(
       console.warn("[getLiveValue] v4 slot0", meta.tokenId, e);
     }
 
-    // V4 fee growth
+    // V4 fee growth (serialized to avoid 429s)
     if (liquidity > 0n) {
       try {
-        const [inside, posInfo] = await Promise.all([
-          client.readContract({
-            address: stateView,
-            abi: stateViewAbi,
-            functionName: "getFeeGrowthInside",
-            args: [poolId, meta.tickLower, meta.tickUpper],
-          }),
-          client.readContract({
-            address: stateView,
-            abi: stateViewAbi,
-            functionName: "getPositionInfo",
-            args: [
-              poolId,
-              (process.env.V4_POSITION_MANAGER as Address) ||
-                ROBINHOOD.v4PositionManager,
-              meta.tickLower,
-              meta.tickUpper,
-              salt,
-            ],
-          }),
-        ]);
+        const inside = await throttled(() => client.readContract({
+          address: stateView,
+          abi: stateViewAbi,
+          functionName: "getFeeGrowthInside",
+          args: [poolId, meta.tickLower, meta.tickUpper],
+        }));
+        const posInfo = await throttled(() => client.readContract({
+          address: stateView,
+          abi: stateViewAbi,
+          functionName: "getPositionInfo",
+          args: [
+            poolId,
+            (process.env.V4_POSITION_MANAGER as Address) ||
+              ROBINHOOD.v4PositionManager,
+            meta.tickLower,
+            meta.tickUpper,
+            salt,
+          ],
+        }));
         const last0 = posInfo[1] as bigint;
         const last1 = posInfo[2] as bigint;
         const liqPos = (posInfo[0] as bigint) || liquidity;

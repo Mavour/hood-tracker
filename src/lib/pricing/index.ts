@@ -11,6 +11,7 @@ import { price0In1FromSqrt } from "../chain/math";
 import { getTokenMeta, resolvePool } from "../chain/positions";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
+import { throttled } from "../chain/rpc-throttle";
 
 export type DualPrice = {
   usd: number;
@@ -94,11 +95,11 @@ async function ethUsdLive(): Promise<number> {
     const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
     if (pool) {
       const client = getPublicClient();
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
-      });
+      }));
       const meta0 = await getTokenMeta(ROBINHOOD.wrapped);
       const meta1 = await getTokenMeta(ROBINHOOD.usdg);
       // token0 is lower address
@@ -136,12 +137,12 @@ async function ethUsdAtBlock(blockNumber: bigint): Promise<number> {
     const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
     if (pool) {
       const client = getPublicClient();
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
         blockNumber,
-      });
+      }));
       const meta0 = await getTokenMeta(ROBINHOOD.wrapped);
       const meta1 = await getTokenMeta(ROBINHOOD.usdg);
       const t0 =
@@ -180,11 +181,11 @@ export async function getPairPriceLiveFromPool(
 ): Promise<{ price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number }> {
   try {
     const client = getPublicClient();
-    const slot0 = await client.readContract({
+    const slot0 = await throttled(() => client.readContract({
       address: poolAddress,
       abi: poolAbi,
       functionName: "slot0",
-    });
+    }));
     const sqrt = slot0[0] as bigint;
     const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
 
@@ -270,11 +271,11 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
       const pool = await resolvePool(token, ROBINHOOD.wrapped, fee);
       if (!pool) continue;
       const client = getPublicClient();
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
-      });
+      }));
       const metaT = await getTokenMeta(token);
       const metaW = await getTokenMeta(ROBINHOOD.wrapped);
       const sqrt = slot0[0] as bigint;
@@ -307,11 +308,11 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
       const pool = await resolvePool(token, ROBINHOOD.usdg, fee);
       if (!pool) continue;
       const client = getPublicClient();
-      const slot0 = await client.readContract({
+      const slot0 = await throttled(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
-      });
+      }));
       const metaT = await getTokenMeta(token);
       const metaS = await getTokenMeta(ROBINHOOD.usdg);
       const sqrt = slot0[0] as bigint;
@@ -394,12 +395,12 @@ export async function getPoolPriceAtBlock(
 
   try {
     const client = getPublicClient();
-    const slot0 = await client.readContract({
+    const slot0 = await throttled(() => client.readContract({
       address: poolAddress,
       abi: poolAbi,
       functionName: "slot0",
       blockNumber,
-    });
+    }));
     const sqrt = slot0[0] as bigint;
     const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
 
@@ -489,13 +490,13 @@ export async function getV4PairPriceAtBlock(
   try {
     const client = getPublicClient();
     const stateView = getV4StateView();
-    const slot0 = await client.readContract({
+    const slot0 = await throttled(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getSlot0",
       args: [poolId],
       blockNumber,
-    });
+    }));
     const sqrt = slot0[0] as bigint;
     const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
 

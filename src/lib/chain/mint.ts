@@ -14,6 +14,7 @@ import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { getPublicClient } from "./client";
 import { getV4PositionManager } from "./v4/positions";
 import { getDeposit, saveDeposit, type DepositRecord } from "../db";
+import { throttled } from "./rpc-throttle";
 
 /** V3 pool Mint event topic (Uniswap V3 pool) */
 const MINT_TOPIC =
@@ -460,13 +461,13 @@ export async function getV4HistoricalAmounts(
 
     const client = getPublicClient();
     const stateView = getV4StateView();
-    const slot0 = await client.readContract({
+    const slot0 = await throttled(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getSlot0",
       args: [poolId],
       blockNumber,
-    });
+    }));
     const sqrtPriceX96 = slot0[0] as bigint;
     return getAmountsForLiquidity(sqrtPriceX96, tickLower, tickUpper, liquidity);
   } catch (e) {

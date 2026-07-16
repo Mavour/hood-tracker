@@ -6,6 +6,7 @@ import {
   type CachedPositionMeta,
 } from "@/lib/pnl/getLiveValue";
 import { feeTierLabel } from "@/lib/utils";
+import { mapWithConcurrency } from "@/lib/chain/rpc-throttle";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,8 +35,7 @@ export async function GET(
   const positions = cache.positions as Array<Record<string, unknown>>;
   const open = positions.filter((p) => p.isOpen === true);
 
-  const liveRows = await Promise.all(
-    open.map(async (p) => {
+  const liveRows = await mapWithConcurrency(open, 2, async (p) => {
       try {
         const meta: CachedPositionMeta = {
           tokenId: String(p.tokenId),
@@ -92,7 +92,7 @@ export async function GET(
         console.warn("[live] position error", p.tokenId, e);
         return null;
       }
-    }),
+    },
   );
 
   const rows = liveRows.filter(Boolean) as NonNullable<
