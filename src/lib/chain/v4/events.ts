@@ -240,7 +240,7 @@ async function fetchModifyLiquidityHashesViaRpc(
     // Alchemy free tier: max 10 block range per eth_getLogs call — this function is
     // now a supplement for very recent activity not yet indexed by Blockscout, not the
     // primary source.
-    const from = latest > 10n ? latest - 10n : 0n;
+    const from = latest > 9n ? latest - 9n : 0n;
 
     const logs = await withTimeout(
       client.getLogs({
