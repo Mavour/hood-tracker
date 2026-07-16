@@ -11,7 +11,7 @@ import { getPublicClient } from "../chain/client";
 import { getAmountsForLiquidity, humanAmount } from "../chain/math";
 import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { computeV3UnclaimedFees, feesFromGrowth } from "../chain/fees";
-import { getTokenPriceLive } from "../pricing";
+import { getTokenPriceLive, getPairPriceLiveFromPool } from "../pricing";
 import { ttlGetOrSet } from "../cache/ttl";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
@@ -276,10 +276,29 @@ export async function getLiveValue(
   const f0 = humanAmount(f0Raw, meta.decimals0);
   const f1 = humanAmount(f1Raw, meta.decimals1);
 
-  const [p0, p1] = await Promise.all([
-    getTokenPriceLive(meta.token0 as Address),
-    getTokenPriceLive(meta.token1 as Address),
-  ]);
+  let p0: { usd: number; eth: number };
+  let p1: { usd: number; eth: number };
+
+  // Use pool address directly when available (bypasses fee-tier guessing)
+  if (meta.poolAddress && !isV4) {
+    const pp = await getPairPriceLiveFromPool(
+      meta.poolAddress as Address,
+      meta.token0 as Address,
+      meta.token1 as Address,
+      meta.decimals0,
+      meta.decimals1,
+    );
+    p0 = { usd: pp.price0Usd, eth: pp.price0Eth };
+    p1 = { usd: pp.price1Usd, eth: pp.price1Eth };
+  } else {
+    // For V4 (no poolAddress) or when pool pricing fails, fall back to generic
+    const [p0r, p1r] = await Promise.all([
+      getTokenPriceLive(meta.token0 as Address),
+      getTokenPriceLive(meta.token1 as Address),
+    ]);
+    p0 = p0r;
+    p1 = p1r;
+  }
 
   const principalUsd = a0 * p0.usd + a1 * p1.usd;
   const principalEth = a0 * p0.eth + a1 * p1.eth;

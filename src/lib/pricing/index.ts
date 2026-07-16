@@ -165,6 +165,78 @@ async function ethUsdAtBlock(blockNumber: bigint): Promise<number> {
 }
 
 /**
+ * Live dual price for a token pair from a KNOWN pool address.
+ * Reads slot0 directly — no fee tier guessing needed.
+ * Same logic as getPoolPriceAtBlock but live (no blockNumber).
+ */
+export async function getPairPriceLiveFromPool(
+  poolAddress: Address,
+  token0: Address,
+  token1: Address,
+  decimals0: number,
+  decimals1: number,
+): Promise<{ price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number }> {
+  try {
+    const client = getPublicClient();
+    const slot0 = await client.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "slot0",
+    });
+    const sqrt = slot0[0] as bigint;
+    const p0in1 = price0In1FromSqrt(sqrt, decimals0, decimals1);
+
+    if (isWeth(token0)) {
+      const ethUsd = await ethUsdLive();
+      return {
+        price0Usd: ethUsd,
+        price0Eth: 1,
+        price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
+        price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+      };
+    }
+    if (isWeth(token1)) {
+      const ethUsd = await ethUsdLive();
+      return {
+        price0Usd: p0in1 * ethUsd,
+        price0Eth: p0in1,
+        price1Usd: ethUsd,
+        price1Eth: 1,
+      };
+    }
+    if (isStable(token0)) {
+      const ethUsd = await ethUsdLive();
+      return {
+        price0Usd: 1,
+        price0Eth: ethUsd > 0 ? 1 / ethUsd : 0,
+        price1Usd: p0in1 > 0 ? 1 / p0in1 : 0,
+        price1Eth: ethUsd > 0 && p0in1 > 0 ? 1 / p0in1 / ethUsd : 0,
+      };
+    }
+    if (isStable(token1)) {
+      const ethUsd = await ethUsdLive();
+      return {
+        price0Usd: p0in1,
+        price0Eth: ethUsd > 0 ? p0in1 / ethUsd : 0,
+        price1Usd: 1,
+        price1Eth: ethUsd > 0 ? 1 / ethUsd : 0,
+      };
+    }
+    // Generic token pair (neither is WETH or stable) — bridge via WETH
+    const ethUsd = await ethUsdLive();
+    return {
+      price0Usd: p0in1 * ethUsd,
+      price0Eth: p0in1,
+      price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
+      price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+    };
+  } catch {
+    /* fall through */
+  }
+  return { price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0 };
+}
+
+/**
  * Live dual price for a token.
  */
 export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
@@ -190,9 +262,9 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
     return price;
   }
 
-  // Try pool vs WETH
+  // Try pool vs WETH — include custom fee tiers (Uniswap V3 fork allows arbitrary fees)
   try {
-    for (const fee of [10000, 3000, 500, 100]) {
+    for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
       const pool = await resolvePool(token, ROBINHOOD.wrapped, fee);
       if (!pool) continue;
       const client = getPublicClient();
@@ -229,7 +301,7 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
 
   // Pool vs USDG
   try {
-    for (const fee of [10000, 3000, 500, 100]) {
+    for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
       const pool = await resolvePool(token, ROBINHOOD.usdg, fee);
       if (!pool) continue;
       const client = getPublicClient();

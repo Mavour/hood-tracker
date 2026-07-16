@@ -31,7 +31,7 @@ import {
   type LiveV4Position,
 } from "../chain/v4/positions";
 import { getV4PositionEvents } from "../chain/v4/events";
-import { getTokenPriceLive, valueDual, getPoolPriceAtBlock } from "../pricing";
+import { getTokenPriceLive, valueDual, getPoolPriceAtBlock, getPairPriceLiveFromPool } from "../pricing";
 import {
   computePositionPnl,
   aggregatePortfolio,
@@ -112,7 +112,18 @@ async function updateJob(
   });
 }
 
-async function livePricesForPair(token0: Address, token1: Address) {
+async function livePricesForPair(
+  token0: Address,
+  token1: Address,
+  poolAddress?: Address | null,
+  decimals0?: number,
+  decimals1?: number,
+) {
+  // When pool is known, read slot0 directly — no fee tier guessing needed
+  if (poolAddress && decimals0 !== undefined && decimals1 !== undefined) {
+    const pp = await getPairPriceLiveFromPool(poolAddress, token0, token1, decimals0, decimals1);
+    if (pp.price0Usd > 0 || pp.price1Usd > 0) return pp;
+  }
   const [p0, p1] = await Promise.all([
     getTokenPriceLive(token0),
     getTokenPriceLive(token1),
@@ -342,7 +353,7 @@ async function buildOnePosition(
 
   // V3 fallback: if on-chain resolution fails for an open position, use current live amounts
   if (!mintDeposit && isOpen && livePos && (livePos.amount0Human > 0 || livePos.amount1Human > 0)) {
-    const estPrices = await livePricesForPair(token0, token1);
+    const estPrices = await livePricesForPair(token0, token1, poolAddress, meta0.decimals, meta1.decimals);
     mintDeposit = {
       amount0: livePos.amount0Human,
       amount1: livePos.amount1Human,
