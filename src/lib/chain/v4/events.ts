@@ -237,7 +237,10 @@ async function fetchModifyLiquidityHashesViaRpc(
 
   try {
     const latest = await withTimeout(client.getBlockNumber(), 5_000);
-    const from = latest > 2_000_000n ? latest - 2_000_000n : 0n;
+    // Alchemy free tier: max 10 block range per eth_getLogs call — this function is
+    // now a supplement for very recent activity not yet indexed by Blockscout, not the
+    // primary source.
+    const from = latest > 10n ? latest - 10n : 0n;
 
     const logs = await withTimeout(
       client.getLogs({
@@ -268,6 +271,57 @@ async function fetchModifyLiquidityHashesViaRpc(
   return [...hashes];
 }
 
+/** Primary source for V4 decrease/collect discovery — Blockscout module=logs has
+ *  no block-range limit (unlike Alchemy free tier's 10-block eth_getLogs cap),
+ *  same pattern as the working V3 pipeline in ../events.ts. topic0 = ModifyLiquidity
+ *  signature, topic1 = poolId (indexed). Salt (tokenId) is verified from the log
+ *  data afterward since it's a non-indexed field. */
+async function fetchModifyLiquidityHashesViaBlockscout(
+  tokenId: bigint,
+  poolId?: Hex,
+): Promise<string[]> {
+  if (!poolId) return [];
+  const pm = getV4PoolManager();
+  const MODIFY_LIQUIDITY_TOPIC =
+    "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
+  const saltHex = tokenId.toString(16).padStart(64, "0");
+
+  const url =
+    `${ROBINHOOD.explorer}/api?module=logs&action=getLogs` +
+    `&fromBlock=0&toBlock=latest` +
+    `&address=${pm}` +
+    `&topic0=${MODIFY_LIQUIDITY_TOPIC}&topic1=${poolId}&topic0_1_opr=and`;
+
+  try {
+    const res = await withTimeout(fetch(url), 8_000);
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      status?: string;
+      result?: Array<{ data?: string; transactionHash?: string }>;
+    };
+    if (json.status === "0" || !Array.isArray(json.result)) return [];
+
+    const hashes = new Set<string>();
+    for (const l of json.result) {
+      const hex = (l.data ?? "0x").startsWith("0x")
+        ? (l.data ?? "0x").slice(2)
+        : (l.data ?? "");
+      if (hex.length < 256) continue;
+      // salt (tokenId) is the last 32 bytes — non-indexed 4th field in the data
+      if (hex.slice(192, 256) !== saltHex) continue;
+      if (l.transactionHash) hashes.add(l.transactionHash);
+    }
+    return [...hashes];
+  } catch (e) {
+    console.warn(
+      "[v4 modify blockscout]",
+      tokenId.toString(),
+      e instanceof Error ? e.message.slice(0, 80) : e,
+    );
+    return [];
+  }
+}
+
 /**
  * Fetch V4 NFT lifecycle + ModifyLiquidity for one tokenId.
  */
@@ -295,8 +349,13 @@ export async function getV4PositionEvents(
     for (const e of transferEvents) allTxHashes.add(e.txHash);
   }
 
-  // Source 2: RPC scan for ModifyLiquidity events (catches decrease/collect txs
-  // that don't involve NFT transfers)
+  // Source 2: Blockscout log scan for ModifyLiquidity events (catches decrease/collect
+  // txs that don't involve NFT transfers) — full history, no RPC block-range limit.
+  const modifyHashesBs = await fetchModifyLiquidityHashesViaBlockscout(tokenId, poolId);
+  for (const h of modifyHashesBs) allTxHashes.add(h);
+
+  // Source 2b: RPC scan bounded to the last 10 blocks (Alchemy free tier cap) —
+  // catches very recent activity Blockscout hasn't indexed yet. Supplement only.
   const rpcHashes = await fetchModifyLiquidityHashesViaRpc(tokenId, poolId);
   for (const h of rpcHashes) allTxHashes.add(h);
 
