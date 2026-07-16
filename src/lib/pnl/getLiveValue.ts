@@ -8,10 +8,10 @@
 import { type Address, type Hex, pad, toHex } from "viem";
 import { poolAbi, npmAbi } from "../chain/abis";
 import { getPublicClient } from "../chain/client";
-import { getAmountsForLiquidity, humanAmount } from "../chain/math";
+import { getAmountsForLiquidity, humanAmount, price0In1FromSqrt } from "../chain/math";
 import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { computeV3UnclaimedFees, feesFromGrowth } from "../chain/fees";
-import { getTokenPriceLive, getPairPriceLiveFromPool } from "../pricing";
+import { getTokenPriceLive, getPairPriceLiveFromPool, ethUsdLive } from "../pricing";
 import { ttlGetOrSet } from "../cache/ttl";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
@@ -140,6 +140,8 @@ export async function getLiveValue(
   let f0Raw = 0n;
   let f1Raw = 0n;
   let liquidity = liqCached;
+  let slot0Sqrt = 0n;
+  let slot0Ready = false;
 
   if (isV4) {
     // V4: use StateView for slot0 + V4 fee growth
@@ -171,6 +173,8 @@ export async function getLiveValue(
       );
       currentTick = slot0.tick;
       inRange = currentTick >= meta.tickLower && currentTick < meta.tickUpper;
+      slot0Sqrt = slot0.sqrtPriceX96;
+      slot0Ready = true;
 
       if (liquidity > 0n) {
         const am = getAmountsForLiquidity(
@@ -279,7 +283,33 @@ export async function getLiveValue(
   let p1: { usd: number; eth: number };
 
   // Use pool address directly when available (bypasses fee-tier guessing)
-  if (meta.poolAddress && !isV4) {
+  if (isV4 && slot0Ready) {
+    // V4: compute prices from the pool's own sqrtPriceX96 (works for V4-only
+    // tokens like VEX that have no V3 pools). getTokenPriceLive only searches V3.
+    const p0in1 = price0In1FromSqrt(slot0Sqrt, meta.decimals0, meta.decimals1);
+    const ethUsd = await ethUsdLive();
+    const usdgLc = ROBINHOOD.usdg.toLowerCase();
+    const wethLc = ROBINHOOD.wrapped.toLowerCase();
+    const t0Lc = (meta.token0 ?? "").toLowerCase();
+    const t1Lc = (meta.token1 ?? "").toLowerCase();
+    if (t0Lc === usdgLc) {
+      p0 = { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0 };
+      p1 = { usd: p0in1 > 0 ? 1 / p0in1 : 0, eth: ethUsd > 0 && p0in1 > 0 ? 1 / p0in1 / ethUsd : 0 };
+    } else if (t1Lc === usdgLc) {
+      p0 = { usd: p0in1, eth: ethUsd > 0 ? p0in1 / ethUsd : 0 };
+      p1 = { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0 };
+    } else if (t0Lc === wethLc) {
+      p0 = { usd: ethUsd, eth: 1 };
+      p1 = { usd: p0in1 > 0 ? ethUsd / p0in1 : 0, eth: p0in1 > 0 ? 1 / p0in1 : 0 };
+    } else if (t1Lc === wethLc) {
+      p0 = { usd: p0in1 * ethUsd, eth: p0in1 };
+      p1 = { usd: ethUsd, eth: 1 };
+    } else {
+      // Generic pair — bridge via WETH
+      p0 = { usd: p0in1 * ethUsd, eth: p0in1 };
+      p1 = { usd: p0in1 > 0 ? ethUsd / p0in1 : 0, eth: p0in1 > 0 ? 1 / p0in1 : 0 };
+    }
+  } else if (meta.poolAddress && !isV4) {
     const pp = await getPairPriceLiveFromPool(
       meta.poolAddress as Address,
       meta.token0 as Address,
@@ -290,7 +320,6 @@ export async function getLiveValue(
     p0 = { usd: pp.price0Usd, eth: pp.price0Eth };
     p1 = { usd: pp.price1Usd, eth: pp.price1Eth };
   } else {
-    // For V4 (no poolAddress) or when pool pricing fails, fall back to generic
     const [p0r, p1r] = await Promise.all([
       getTokenPriceLive(meta.token0 as Address),
       getTokenPriceLive(meta.token1 as Address),

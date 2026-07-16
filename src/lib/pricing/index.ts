@@ -89,7 +89,7 @@ async function fetchDexScreenerUsd(token: Address): Promise<number | null> {
   }
 }
 
-async function ethUsdLive(): Promise<number> {
+export async function ethUsdLive(): Promise<number> {
   // Prefer WETH/USDG pool if exists
   try {
     const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
