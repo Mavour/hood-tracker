@@ -78,6 +78,8 @@ export type DailyPnl = {
   positionsOpened: number;
   positionsClosed: number;
   eventCount: number;
+  closeCount: number;
+  winCount: number;
 };
 
 function eventValue(
@@ -302,6 +304,8 @@ export function computeDailyPnl(
         positionsOpened: 0,
         positionsClosed: 0,
         eventCount: 0,
+        closeCount: 0,
+        winCount: 0,
       };
       days.set(date, d);
     }

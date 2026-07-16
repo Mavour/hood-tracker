@@ -52,6 +52,8 @@ function emptyDay(date: string): DailyPnl {
     positionsOpened: 0,
     positionsClosed: 0,
     eventCount: 0,
+    closeCount: 0,
+    winCount: 0,
   };
 }
 
@@ -161,6 +163,12 @@ export function buildDailyPnl(
     d.feePnlEth += p.feePnlEth;
     d.pricePnlUsd += p.pricePnlUsd;
     d.pricePnlEth += p.pricePnlEth;
+
+    // closeCount/winCount from close_history (settlement-aligned)
+    if (ch) {
+      d.closeCount += 1;
+      if (ch.finalPnlUsd > 0) d.winCount += 1;
+    }
   }
 
   // ── 3) Today: open unrealized paper PnL ──
@@ -189,7 +197,8 @@ export function buildDailyPnl(
         d.positionsClosed > 0 ||
         d.depositUsd > 0 ||
         d.withdrawUsd > 0 ||
-        d.feesUsd > 0,
+        d.feesUsd > 0 ||
+        d.closeCount > 0,
     )
     .sort((a, b) => a.date.localeCompare(b.date));
 }

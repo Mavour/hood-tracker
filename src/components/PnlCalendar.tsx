@@ -28,12 +28,19 @@ export type DayPnl = {
   positionsOpened?: number;
   positionsClosed?: number;
   eventCount?: number;
+  closeCount?: number;
+  winCount?: number;
 };
 
 function intensity(value: number, maxAbs: number): number {
   if (maxAbs <= 0 || value === 0) return 0;
   const t = Math.min(1, Math.abs(value) / maxAbs);
   return 0.18 + t * 0.7;
+}
+
+function winrate(winCount: number, closeCount: number): string {
+  if (closeCount === 0) return "--";
+  return `${((winCount * 100) / closeCount).toFixed(1)}%`;
 }
 
 /** Compact month grid — fits desktop split pane without overflowing viewport. */
@@ -85,9 +92,30 @@ export function PnlCalendar({
   const gridEnd = endOfWeek(monthEnd, { weekStartsOn: 1 });
   const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
 
+  // Monthly aggregates (UniLP-Monitoring style)
+  const monthStats = useMemo(() => {
+    const mKey = format(cursor, "yyyy-MM");
+    let totalPnl = 0;
+    let totalClose = 0;
+    let totalWin = 0;
+    let activeDays = 0;
+    for (const d of daily) {
+      if (!d.date.startsWith(mKey)) continue;
+      const v = currency === "usd" ? d.netPnlUsd : d.netPnlEth;
+      totalPnl += v;
+      const cc = d.closeCount ?? 0;
+      const wc = d.winCount ?? 0;
+      totalClose += cc;
+      totalWin += wc;
+      if (cc > 0 || Math.abs(v) > 1e-12) activeDays += 1;
+    }
+    return { totalPnl, totalClose, totalWin, activeDays };
+  }, [daily, cursor, currency]);
+
   return (
     <div className="rh-card flex h-full flex-col p-4 sm:p-5">
-      <div className="mb-3 flex items-center justify-between gap-2">
+      {/* Header */}
+      <div className="mb-2 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-rh-white sm:text-base">
           {format(cursor, "MMMM yyyy")}
         </h3>
@@ -113,7 +141,42 @@ export function PnlCalendar({
         </div>
       </div>
 
-      <div className="mb-1.5 grid grid-cols-7 gap-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-rh-muted">
+      {/* Summary bar (UniLP-Monitoring style) */}
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] pb-2 text-[11px]">
+        <span
+          className={cn(
+            "font-semibold tabular-nums",
+            monthStats.totalPnl >= 0 ? "text-rh-green" : "text-rh-red",
+          )}
+        >
+          {formatSigned(monthStats.totalPnl, currency)}
+        </span>
+        <span className="text-rh-muted">
+          {monthStats.activeDays} active day{monthStats.activeDays !== 1 ? "s" : ""}
+        </span>
+        {monthStats.totalClose > 0 && (
+          <>
+            <span className="text-rh-muted">
+              {monthStats.totalClose} LP close{monthStats.totalClose !== 1 ? "s" : ""}
+            </span>
+            <span
+              className={cn(
+                "font-semibold",
+                monthStats.totalWin > monthStats.totalClose - monthStats.totalWin
+                  ? "text-rh-green"
+                  : monthStats.totalWin < monthStats.totalClose - monthStats.totalWin
+                    ? "text-rh-red"
+                    : "text-rh-muted",
+              )}
+            >
+              {winrate(monthStats.totalWin, monthStats.totalClose)} win
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* Day-of-week headers */}
+      <div className="mb-1 grid grid-cols-7 gap-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-rh-muted">
         {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((d) => (
           <div key={d} className="py-0.5">
             {d}
@@ -121,6 +184,7 @@ export function PnlCalendar({
         ))}
       </div>
 
+      {/* Calendar grid */}
       <div className="grid grid-cols-7 gap-0.5">
         {days.map((day) => {
           const key = format(day, "yyyy-MM-dd");
@@ -134,6 +198,8 @@ export function PnlCalendar({
           const a = data ? intensity(value, maxAbs) : 0;
           const isProfit = value > 0;
           const isLoss = value < 0;
+          const cc = data?.closeCount ?? 0;
+          const wc = data?.winCount ?? 0;
 
           return (
             <button
@@ -143,12 +209,19 @@ export function PnlCalendar({
               onClick={() => data && onSelectDay(data)}
               title={
                 data
-                  ? `${key}: ${formatSigned(value, currency)}`
+                  ? [
+                      `${key}`,
+                      `${formatSigned(value, currency)}`,
+                      cc > 0 ? `${cc} LP close${cc !== 1 ? "s" : ""}` : null,
+                      cc > 0 ? `${winrate(wc, cc)} win` : null,
+                    ]
+                      .filter(Boolean)
+                      .join("\n")
                   : key
               }
               className={cn(
-                "relative flex flex-col items-center justify-center rounded-md border text-[11px] transition-all",
-                compact ? "h-8 sm:h-9" : "aspect-square",
+                "relative flex flex-col items-center justify-center rounded-md border text-[10px] transition-all",
+                compact ? "h-10 sm:h-11" : "aspect-square",
                 inMonth ? "border-white/[0.06]" : "border-transparent opacity-30",
                 data
                   ? "cursor-pointer hover:ring-1 hover:ring-rh-neon/50"
@@ -174,12 +247,31 @@ export function PnlCalendar({
               >
                 {format(day, "d")}
               </span>
-              {/* amounts only on tooltip — keeps grid short */}
+              {data && (
+                <span
+                  className={cn(
+                    "mt-0.5 leading-none tabular-nums",
+                    isProfit
+                      ? "text-rh-green"
+                      : isLoss
+                        ? "text-rh-red"
+                        : "text-rh-muted",
+                  )}
+                >
+                  {formatSigned(value, currency)}
+                </span>
+              )}
+              {data && cc > 0 && (
+                <span className="mt-0.5 leading-none text-rh-muted">
+                  {cc}c {winrate(wc, cc)}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
 
+      {/* Footer */}
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3 text-[10px] text-rh-muted">
         <span>
           {daily.length

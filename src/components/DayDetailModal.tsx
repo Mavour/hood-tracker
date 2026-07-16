@@ -20,6 +20,9 @@ export function DayDetailModal({
     currency === "usd" ? (day.feePnlUsd ?? 0) : (day.feePnlEth ?? 0);
   const price =
     currency === "usd" ? (day.pricePnlUsd ?? 0) : (day.pricePnlEth ?? 0);
+  const cc = day.closeCount ?? 0;
+  const wc = day.winCount ?? 0;
+  const wr = cc > 0 ? `${((wc * 100) / cc).toFixed(1)}%` : "--";
 
   return (
     <div
@@ -71,6 +74,16 @@ export function DayDetailModal({
             value={String(day.positionsClosed ?? 0)}
           />
           <Row label="Events" value={String(day.eventCount ?? 0)} />
+          {cc > 0 && (
+            <>
+              <div className="my-2 border-t border-rh-line" />
+              <Row
+                label="LP settlements"
+                value={`${cc} (${wc}W / ${cc - wc}L)`}
+              />
+              <Row label="Win rate" value={wr} />
+            </>
+          )}
         </div>
       </div>
     </div>
