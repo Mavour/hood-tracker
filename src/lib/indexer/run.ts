@@ -376,6 +376,7 @@ async function buildOnePosition(
       price0Eth: estPrices.price0Eth,
       price1Eth: estPrices.price1Eth,
       blockNumber: 0,
+      source: "estimate",
     };
   }
 
@@ -499,10 +500,18 @@ async function buildOnePosition(
           quoteToken,
         );
 
-        // Store totalReceived in position metadata for settlement finalization
+        // Identify close tx hash so finalizeCloseHistory can exclude it from
+        // cashflow totals (prevents double-counting close flows in realized).
+        const closeTxHash = priced
+          .filter((e) => e.eventType === "decrease" && e.txHash)
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))[0]
+          ?.txHash ?? null;
+
+        // Store totalReceived + close tx in metadata for settlement finalization
         const { updatePositionStatus: _upd } = await import("../db");
         await _upd(positionId, "closing", {
           totalReceived: totalReceived.toString(),
+          closeTransactionHash: closeTxHash,
           token0,
           token1,
           quoteToken,
@@ -717,6 +726,7 @@ async function buildOneV4Position(
       price0Eth: estPrices.price0Eth,
       price1Eth: estPrices.price1Eth,
       blockNumber: 0,
+      source: "estimate",
     };
   }
 
@@ -792,9 +802,17 @@ async function buildOneV4Position(
 
         totalReceived = adjustTotalReceivedForGas(totalReceived, {}, vp.token0);
 
+        // Identify close tx hash so finalizeCloseHistory can exclude it from
+        // cashflow totals (prevents double-counting close flows in realized).
+        const closeTxHash = priced
+          .filter((e) => e.eventType === "decrease" && e.txHash)
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))[0]
+          ?.txHash ?? null;
+
         const { updatePositionStatus: _upd } = await import("../db");
         await _upd(positionId, "closing", {
           totalReceived: totalReceived.toString(),
+          closeTransactionHash: closeTxHash,
           token0: vp.token0,
           token1: vp.token1,
           quoteToken: vp.token0,

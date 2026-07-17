@@ -73,6 +73,7 @@ assert(Math.abs(open.withdrawnUsd - 2600) < 1e-6, `wd ${open.withdrawnUsd}`);
 assert(Math.abs(open.netPnlUsd - -754) < 1e-6, `net ${open.netPnlUsd}`);
 // pnlBps = (-754 / 5000) * 10000 = -1508
 assert(Math.abs(open.pnlBps! - (-754 / 5000) * 10000) < 1e-6, `pnlBps ${open.pnlBps}`);
+assert(open.costBasisSource === "events", `costBasisSource ${open.costBasisSource}`);
 
 const closed = computePositionPnl({
   tokenId: "2",
@@ -407,4 +408,44 @@ assert(
   `v4 collect pnlBps got ${v4collectOnly.pnlBps}`,
 );
 
+// --- Cost basis estimate fallback: no mint/increase events, only decrease + collect ---
+const estimateEvents: PricedEvent[] = [
+  {
+    eventType: "collect",
+    timestamp: 1_800_086_400,
+    amount0: 0.05,
+    amount1: 100,
+    price0Usd: 3000,
+    price1Usd: 1,
+    price0Eth: 1,
+    price1Eth: 1 / 3000,
+  },
+  {
+    eventType: "decrease",
+    timestamp: 1_800_172_800,
+    amount0: 0.9,
+    amount1: 2800,
+    price0Usd: 3000,
+    price1Usd: 1,
+    price0Eth: 1,
+    price1Eth: 1 / 3000,
+  },
+];
+
+const estimate = computePositionPnl({
+  tokenId: "estimate-1",
+  events: estimateEvents,
+  currentValueUsd: 0,
+  unclaimedFeesUsd: 0,
+  isOpen: false,
+});
+
+assert(estimate.costBasisSource === "estimate", `costBasisSource ${estimate.costBasisSource}`);
+// deposit = 0 (no increase/mint), withdrawn = 0.9*3000+2800=5500, fees=0.05*3000+100=250
+// fallback estUsd = principal(0) + withdrawn(5500) + fees(250) = 5750
+assert(Math.abs(estimate.depositUsd - 5750) < 1e-6, `estimate deposit ${estimate.depositUsd}`);
+// net = 5500 + 250 - 5750 = 0
+assert(Math.abs(estimate.netPnlUsd - 0) < 1e-6, `estimate net ${estimate.netPnlUsd}`);
+
+console.log("✓ Cost basis estimate test passed");
 console.log("✓ V4 closed with real amounts tests passed");

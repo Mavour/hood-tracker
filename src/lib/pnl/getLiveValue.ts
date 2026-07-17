@@ -45,6 +45,8 @@ export type LiveValueResult = {
   amount0Human: number;
   amount1Human: number;
   lastUpdated: string;
+  /** "spot" = mark-to-market from pool slot0; "route_quote" = execution-aware swap quote */
+  valuationMethod: "spot" | "route_quote";
 };
 
 const SLOT0_TTL_MS = 10_000;
@@ -314,5 +316,6 @@ export async function getLiveValue(
     amount0Human: a0,
     amount1Human: a1,
     lastUpdated: new Date().toISOString(),
+    valuationMethod: "spot",
   };
 }

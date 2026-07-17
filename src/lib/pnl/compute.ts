@@ -32,6 +32,8 @@ export type PositionPnl = {
   netPnlUsd: number;
   pnlBps: number | null;
   isOpen: boolean;
+  /** "events" = from mint/increase events, "estimate" = inferred from current value (inaccurate) */
+  costBasisSource: "events" | "estimate";
 };
 
 export type MintDeposit = {
@@ -42,6 +44,8 @@ export type MintDeposit = {
   price0Eth: number;
   price1Eth: number;
   blockNumber?: number;
+  /** "onchain" = resolved from mint tx, "estimate" = inferred from current live amounts */
+  source?: "onchain" | "estimate";
 };
 
 export type DailyPnl = {
@@ -124,10 +128,15 @@ export function computePositionPnl(params: {
 
   // Fallback cost basis when mint/increase events are missing
   const costBasisMissing = depositUsd === 0;
+  let costBasisSource: "events" | "estimate" = "events";
   if (costBasisMissing) {
     const estUsd = principalUsd + withdrawnUsd + feesCollectedUsd;
     if (estUsd > 0) {
       depositUsd = estUsd;
+      costBasisSource = "estimate";
+      console.warn(
+        `[pnl] cost basis ESTIMATE for ${tokenId}: deposit=0, estUsd=${estUsd.toFixed(2)} (principal=${principalUsd.toFixed(2)} withdrawn=${withdrawnUsd.toFixed(2)} fees=${feesCollectedUsd.toFixed(2)})`,
+      );
     }
   }
 
@@ -145,6 +154,7 @@ export function computePositionPnl(params: {
     netPnlUsd,
     pnlBps,
     isOpen,
+    costBasisSource,
   };
 }
 

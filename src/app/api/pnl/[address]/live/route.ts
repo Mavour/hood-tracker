@@ -77,6 +77,7 @@ export async function GET(
           amount1Human: live.amount1Human,
           lastUpdated: live.lastUpdated,
           protocol: meta.protocol,
+          valuationMethod: live.valuationMethod,
         };
       } catch (e) {
         console.warn("[live] position error", p.tokenId, e);
