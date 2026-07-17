@@ -277,8 +277,13 @@ export async function getLiveValue(
       price0Usd = p0in1 * ethUsd;
       price1Usd = ethUsd;
     } else {
-      price0Usd = p0in1 * ethUsd;
-      price1Usd = p0in1 > 0 ? ethUsd / p0in1 : 0;
+      const [p0r, p1r] = await Promise.all([
+        getTokenPriceLive(meta.token0 as Address),
+        getTokenPriceLive(meta.token1 as Address),
+      ]);
+      price0Usd = p0r.usd;
+      price1Usd = p1r.usd;
+      pricingIncomplete = !p0r.ok || !p1r.ok;
     }
   } else if (meta.poolAddress && !isV4) {
     const pp = await getPairPriceLiveFromPool(

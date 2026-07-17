@@ -229,13 +229,16 @@ export async function getPairPriceLiveFromPool(
         price1Eth: ethUsd > 0 ? 1 / ethUsd : 0,
       };
     }
-    // Generic token pair (neither is WETH or stable) — bridge via WETH
-    const ethUsd = await ethUsdLive();
+    // Generic token pair (neither is WETH or stable) — price each independently
+    const [p0, p1] = await Promise.all([
+      getTokenPriceLive(token0),
+      getTokenPriceLive(token1),
+    ]);
     return {
-      price0Usd: p0in1 * ethUsd,
-      price0Eth: p0in1,
-      price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
-      price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+      price0Usd: p0.usd,
+      price0Eth: p0.eth,
+      price1Usd: p1.usd,
+      price1Eth: p1.eth,
     };
   } catch {
     /* fall through */
@@ -564,13 +567,16 @@ export async function getV4PairPriceAtBlock(
       blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
       return out;
     }
-    // Generic pair (neither WETH nor stable) — bridge via WETH
-    const ethUsd = await ethUsdAtBlock(blockNumber);
+    // Generic pair (neither WETH nor stable) — price each independently
+    const [p0, p1] = await Promise.all([
+      getTokenPriceLive(token0),
+      getTokenPriceLive(token1),
+    ]);
     const out = {
-      price0Usd: p0in1 * ethUsd,
-      price0Eth: p0in1,
-      price1Usd: p0in1 > 0 ? ethUsd / p0in1 : 0,
-      price1Eth: p0in1 > 0 ? 1 / p0in1 : 0,
+      price0Usd: p0.usd,
+      price0Eth: p0.eth,
+      price1Usd: p1.usd,
+      price1Eth: p1.eth,
     };
     blockPriceCache.set(cacheKey, { price: out, at: Date.now() });
     return out;
