@@ -325,10 +325,11 @@ async function fetchModifyLiquidityHashesViaBlockscout(
 
 /** Discover V4 fee collection (collect/claim) tx hashes via Blockscout.
  *  Collect txs emit ERC20 Transfer events FROM PoolManager/PositionManager TO
- *  the owner — they don't have ModifyLiquidity events and don't transfer the NFT,
- *  so they're invisible to all other discovery sources. We search for Transfer
- *  logs where `to` = owner (topic2) and filter for `from` being PoolManager or
- *  PositionManager. Using the blockscout module=logs API (no block-range limit). */
+ *  the owner. ~93% also have ModifyLiquidity events (matched by salt in
+ *  fetchModifyLiquidityFromTxs); ~7% are standalone (routed via Router) with
+ *  no ModifyLiquidity. We search for Transfer logs where `to` = owner (topic2)
+ *  and filter for `from` being PoolManager or PositionManager. Using the
+ *  blockscout module=logs API (no block-range limit). */
 async function fetchV4CollectHashesViaBlockscout(
   owner: string,
   token0?: Address,
@@ -504,6 +505,30 @@ export async function getV4PositionEvents(
   return all;
 }
 
+/**
+ * Track standalone collect tx hashes already attributed to a position.
+ * Standalone collects (no ModifyLiquidity events) can't be salt-matched to a
+ * specific position. We attribute them to whichever position processes the tx
+ * first (first-come-first-served). This prevents both loss (current bug) and
+ * duplication (multi-position pools). Total owner fees remain accurate.
+ * Reset per indexing run via clearStandaloneCollectTracker().
+ */
+const attributedStandaloneCollects = new Set<string>();
+
+export function clearStandaloneCollectTracker() {
+  attributedStandaloneCollects.clear();
+  v4CollectEventsByPool.clear();
+}
+
+/** Raw collect events accumulated during indexing, keyed by "token0:token1". */
+const v4CollectEventsByPool = new Map<string, Array<{ amount0Raw: bigint; amount1Raw: bigint }>>();
+
+export function consumeV4CollectEvents(): Map<string, Array<{ amount0Raw: bigint; amount1Raw: bigint }>> {
+  const copy = new Map(v4CollectEventsByPool);
+  v4CollectEventsByPool.clear();
+  return copy;
+}
+
 /** Global cache of V4 transfers per address */
 const transferCache = new Map<string, V4Transfer[]>();
 
@@ -666,10 +691,13 @@ export async function fetchModifyLiquidityFromTxs(
       }
 
       // ERC20 Transfer — detect fee collections (incoming to owner).
-      // Only accept if this tx contains a ModifyLiquidity with THIS position's
-      // salt — otherwise the collect may belong to another position in the same
-      // pool (same token0/token1 pair) and would be misattributed.
-      if ((log.topics[0] ?? "") === TRANSFER_TOPIC && owner && txHasMySalt) {
+      // Salt-gated: accept if this tx has ModifyLiquidity with THIS position's salt.
+      // Standalone collects (no ModifyLiquidity): accept only once per tx across all
+      // positions via attributedStandaloneCollects tracker — prevents loss (old bug)
+      // and duplication (multi-position pools). Total owner fees remain accurate.
+      const isStandaloneCollect = txModifySalts.size === 0;
+      const canCollect = txHasMySalt || (isStandaloneCollect && !attributedStandaloneCollects.has(txHash));
+      if ((log.topics[0] ?? "") === TRANSFER_TOPIC && owner && canCollect) {
         const ownerLc = owner.toLowerCase();
         const fromAddr = ("0x" + ((log.topics[1] ?? "").slice(26))).toLowerCase();
         const toAddr = ("0x" + ((log.topics[2] ?? "").slice(26))).toLowerCase();
@@ -687,6 +715,9 @@ export async function fetchModifyLiquidityFromTxs(
               const isToken0 = t0 ? tokenAddr === t0 : false;
               const isToken1 = t1 ? tokenAddr === t1 : false;
               if (!isToken0 && !isToken1) continue;
+              if (isStandaloneCollect) attributedStandaloneCollects.add(txHash);
+              const a0 = isToken0 ? value : 0n;
+              const a1 = isToken1 ? value : 0n;
               events.push({
                 tokenId,
                 eventType: "collect",
@@ -696,9 +727,15 @@ export async function fetchModifyLiquidityFromTxs(
                 timestamp: 0,
                 amount0: isToken0 ? humanAmount(value, decimals0) : 0,
                 amount1: isToken1 ? humanAmount(value, decimals1) : 0,
-                amount0Raw: isToken0 ? value : 0n,
-                amount1Raw: isToken1 ? value : 0n,
+                amount0Raw: a0,
+                amount1Raw: a1,
               });
+              if (t0 && t1) {
+                const poolKey = `${t0}:${t1}`;
+                const arr = v4CollectEventsByPool.get(poolKey) ?? [];
+                arr.push({ amount0Raw: a0, amount1Raw: a1 });
+                v4CollectEventsByPool.set(poolKey, arr);
+              }
             }
           }
         }
@@ -707,4 +744,125 @@ export async function fetchModifyLiquidityFromTxs(
   }
 
   return events;
+}
+
+/**
+ * On-chain ground truth for fee collections.
+ * Sums ALL ERC20 Transfer events from PoolManager/PositionManager → owner
+ * for the given token pair. This is the actual amount received on-chain,
+ * independent of which position it was attributed to.
+ */
+export async function fetchOnChainCollectTotals(
+  owner: string,
+  token0?: Address,
+  token1?: Address,
+): Promise<{ total0Raw: bigint; total1Raw: bigint; txCount: number }> {
+  const pm = getV4PoolManager().toLowerCase();
+  const posm = getV4PositionManager().toLowerCase();
+  const ownerPadded = "0x" + "0".repeat(24) + owner.toLowerCase().slice(2);
+  const tokenAddrs = [token0, token1].filter(Boolean) as Address[];
+
+  let total0Raw = 0n;
+  let total1Raw = 0n;
+  const txHashes = new Set<string>();
+
+  for (const tokenAddr of tokenAddrs) {
+    const url =
+      `${ROBINHOOD.explorer}/api?module=logs&action=getLogs` +
+      `&fromBlock=0&toBlock=latest` +
+      `&address=${tokenAddr}` +
+      `&topic0=${TRANSFER_TOPIC}&topic2=${ownerPadded}&topic0_2_opr=and`;
+
+    try {
+      const res = await withTimeout(fetch(url), 8_000);
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        status?: string;
+        result?: Array<{
+          data?: string;
+          transactionHash?: string;
+          topics?: string[];
+        }>;
+      };
+      if (json.status === "0" || !Array.isArray(json.result)) continue;
+
+      const isToken0 = token0 ? tokenAddr.toLowerCase() === token0.toLowerCase() : false;
+
+      for (const l of json.result) {
+        const fromTopic = l.topics?.[1] ?? "";
+        const fromAddr = ("0x" + fromTopic.slice(26)).toLowerCase();
+        if (fromAddr !== pm && fromAddr !== posm) continue;
+
+        const hex = (l.data ?? "0x").startsWith("0x")
+          ? (l.data ?? "0x").slice(2)
+          : (l.data ?? "");
+        if (hex.length < 64) continue;
+        const value = BigInt("0x" + hex.slice(0, 64));
+        if (value <= 0n) continue;
+
+        if (isToken0) total0Raw += value;
+        else total1Raw += value;
+        if (l.transactionHash) txHashes.add(l.transactionHash);
+      }
+    } catch (e) {
+      console.warn(
+        "[v4 reconcile]",
+        e instanceof Error ? e.message.slice(0, 80) : e,
+      );
+    }
+  }
+
+  return { total0Raw, total1Raw, txCount: txHashes.size };
+}
+
+export type ReconcileResult = {
+  poolLabel: string;
+  systemTotal0Raw: bigint;
+  systemTotal1Raw: bigint;
+  groundTruth0Raw: bigint;
+  groundTruth1Raw: bigint;
+  diff0Pct: number;
+  diff1Pct: number;
+  ok: boolean;
+};
+
+/**
+ * Reconcile system-computed collect totals against on-chain ground truth.
+ * Returns diff percentages for each token. ok=true if both diffs < 2%.
+ */
+export async function reconcilePoolFees(
+  owner: string,
+  token0: Address | undefined,
+  token1: Address | undefined,
+  systemCollectEvents: Array<{ amount0Raw: bigint; amount1Raw: bigint }>,
+): Promise<ReconcileResult> {
+  const ground = await fetchOnChainCollectTotals(owner, token0, token1);
+
+  let sys0 = 0n;
+  let sys1 = 0n;
+  for (const e of systemCollectEvents) {
+    sys0 += e.amount0Raw;
+    sys1 += e.amount1Raw;
+  }
+
+  const diff0 = ground.total0Raw > 0n
+    ? Number((sys0 > ground.total0Raw ? sys0 - ground.total0Raw : ground.total0Raw - sys0) * 10000n / ground.total0Raw) / 100
+    : sys0 > 0n ? 100 : 0;
+  const diff1 = ground.total1Raw > 0n
+    ? Number((sys1 > ground.total1Raw ? sys1 - ground.total1Raw : ground.total1Raw - sys1) * 10000n / ground.total1Raw) / 100
+    : sys1 > 0n ? 100 : 0;
+
+  const ok = diff0 < 2 && diff1 < 2;
+  const label = `${token0?.slice(0, 8)}…/${token1?.slice(0, 8)}…`;
+
+  return {
+    poolLabel: label,
+    systemTotal0Raw: sys0,
+    systemTotal1Raw: sys1,
+    groundTruth0Raw: ground.total0Raw,
+    groundTruth1Raw: ground.total1Raw,
+    diff0Pct: diff0,
+    diff1Pct: diff1,
+    ok,
+  };
 }

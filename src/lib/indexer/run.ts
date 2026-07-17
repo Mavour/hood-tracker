@@ -30,7 +30,7 @@ import {
   getLiveV4Position,
   type LiveV4Position,
 } from "../chain/v4/positions";
-import { getV4PositionEvents } from "../chain/v4/events";
+import { getV4PositionEvents, clearStandaloneCollectTracker, consumeV4CollectEvents, reconcilePoolFees } from "../chain/v4/events";
 import { getTokenPriceLive, valueDual, getPoolPriceAtBlock, getPairPriceLiveFromPool, getV4PairPriceAtBlock } from "../pricing";
 import {
   computePositionPnl,
@@ -1099,6 +1099,7 @@ export async function indexAddress(
 ): Promise<TrackResult> {
   if (!isAddress(address)) throw new Error("Invalid address");
   const owner = address as Address;
+  clearStandaloneCollectTracker();
   const cancelled = () => isIndexCancelled(address, gen);
   const t0 = Date.now();
   /** Hard budget for first paint (first scan, no cache). Increased significantly for unreliable public RPC. */
@@ -1331,6 +1332,26 @@ export async function indexAddress(
           console.log(`[index] bg V4 closed: ${v4ClosedIds.length}`);
         }
       } catch { /* ignore */ }
+    }
+
+    // V4 fee reconciliation: compare system totals vs on-chain ground truth
+    try {
+      const collectByPool = consumeV4CollectEvents();
+      for (const [poolKey, collectEvents] of collectByPool) {
+        if (!collectEvents.length) continue;
+        const [t0, t1] = poolKey.split(":") as [Address, Address];
+        const r = await reconcilePoolFees(owner, t0, t1, collectEvents);
+        if (!r.ok) {
+          console.warn(
+            `[v4 reconcile] ⚠️ ${r.poolLabel} diff0=${r.diff0Pct.toFixed(2)}% diff1=${r.diff1Pct.toFixed(2)}% ` +
+            `sys0=${r.systemTotal0Raw} gt0=${r.groundTruth0Raw} sys1=${r.systemTotal1Raw} gt1=${r.groundTruth1Raw}`
+          );
+        } else {
+          console.log(`[v4 reconcile] ✅ ${r.poolLabel} diff0=${r.diff0Pct.toFixed(2)}% diff1=${r.diff1Pct.toFixed(2)}%`);
+        }
+      }
+    } catch (e) {
+      console.warn("[v4 reconcile] failed", e instanceof Error ? e.message : e);
     }
 
     if (cancelled()) return;
