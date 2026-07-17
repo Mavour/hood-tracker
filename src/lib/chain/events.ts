@@ -14,6 +14,7 @@ import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { getPublicClient, getRpcUrl } from "./client";
 import { humanAmount } from "./math";
 import { getTokenMeta } from "./positions";
+import { throttledRpc, throttledFetch } from "./rpc-throttle";
 
 export type PositionEventType =
   | "increase"
@@ -52,7 +53,7 @@ const BLOCK_TIME_SEC = 0.25;
 
 export async function getBlockTimestamp(blockNumber: bigint): Promise<number> {
   const client = getPublicClient();
-  const block = await client.getBlock({ blockNumber });
+  const block = await throttledRpc(() => client.getBlock({ blockNumber }));
   return Number(block.timestamp);
 }
 
@@ -236,13 +237,13 @@ async function getLogsOnce(params: {
     const to = params.toBlock;
     const from = to > 9n ? to - 9n : 0n;
     const logs = await withTimeout(
-      client.getLogs({
+      throttledRpc(() => client.getLogs({
         address: npm,
         event: params.event,
         args: { tokenId: params.tokenId, ...params.extraArgs } as never,
         fromBlock: from,
         toBlock: to,
-      }),
+      })),
       5_000,
       "getLogs",
     );
@@ -657,7 +658,7 @@ export async function discoverTokenIdsViaAlchemy(
   const ids = new Set<string>();
   try {
     const res = await withTimeout(
-      fetch(rpc, {
+      throttledFetch(rpc, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -16,6 +16,7 @@ type LiveRow = {
   lastUpdated: string;
   costBasisEstimated?: boolean;
   protocol?: string;
+  pricingIncomplete?: boolean;
 };
 
 type LiveTotals = {
@@ -156,6 +157,14 @@ export function LiveOpenPositions({
                   {r.costBasisEstimated && (
                     <span className="rounded-md bg-rh-elevated px-2 py-0.5 text-[10px] text-rh-muted">
                       cost basis est.
+                    </span>
+                  )}
+                  {r.pricingIncomplete && (
+                    <span
+                      className="rounded-md bg-rh-neon/15 px-2 py-0.5 text-[10px] font-semibold text-rh-neon"
+                      title="One or more token prices could not be fetched — values may be incomplete"
+                    >
+                      ⚠ Fee price incomplete
                     </span>
                   )}
                 </div>

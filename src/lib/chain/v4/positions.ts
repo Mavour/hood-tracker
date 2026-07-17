@@ -17,7 +17,7 @@ import { getPublicClient, getRpcUrl } from "../client";
 import { getAmountsForLiquidity, humanAmount } from "../math";
 import { getTokenMeta } from "../positions";
 import { feesFromGrowth } from "../fees";
-import { throttled } from "../rpc-throttle";
+import { throttledRpc, throttledFetch } from "../rpc-throttle";
 import {
   poolManagerAbi,
   stateViewAbi,
@@ -119,7 +119,7 @@ async function listV4IdsAlchemy(owner: Address): Promise<bigint[] | null> {
   if (!rpc.includes("alchemy")) return null;
   const posm = getV4PositionManager();
   try {
-    const res = await fetch(rpc, {
+    const res = await throttledFetch(rpc, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -173,7 +173,7 @@ async function listV4IdsTransfers(owner: Address): Promise<bigint[]> {
   const posm = getV4PositionManager();
   const ids = new Set<string>();
   try {
-    const res = await fetch(rpc, {
+    const res = await throttledFetch(rpc, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -231,7 +231,7 @@ export async function listV4TokenIds(owner: Address): Promise<bigint[]> {
     const results = await Promise.all(
       slice.map(async (id) => {
         try {
-          const o = await throttled(() => client.readContract({
+          const o = await throttledRpc(() => client.readContract({
             address: posm,
             abi: v4PositionManagerAbi,
             functionName: "ownerOf",
@@ -264,13 +264,13 @@ async function computeV4UnclaimedFees(params: {
   const salt = pad(toHex(tokenId), { size: 32 });
 
   try {
-    const inside = await throttled(() => client.readContract({
+    const inside = await throttledRpc(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getFeeGrowthInside",
       args: [poolId, tickLower, tickUpper],
     }));
-    const posInfo = await throttled(() => client.readContract({
+    const posInfo = await throttledRpc(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getPositionInfo",
@@ -300,7 +300,7 @@ export async function getLiveV4Position(
   let poolKeyRaw: V4PoolKey;
   let info: bigint;
   try {
-    const res = await throttled(() => client.readContract({
+    const res = await throttledRpc(() => client.readContract({
       address: posm,
       abi: v4PositionManagerAbi,
       functionName: "getPoolAndPositionInfo",
@@ -328,7 +328,7 @@ export async function getLiveV4Position(
   const { tickLower, tickUpper } = decodeV4PositionInfo(info);
   let liquidity = 0n;
   try {
-    liquidity = (await throttled(() => client.readContract({
+    liquidity = (await throttledRpc(() => client.readContract({
       address: posm,
       abi: v4PositionManagerAbi,
       functionName: "getPositionLiquidity",
@@ -357,7 +357,7 @@ export async function getLiveV4Position(
 
   if (liquidity > 0n) {
     try {
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: stateView,
         abi: stateViewAbi,
         functionName: "getSlot0",

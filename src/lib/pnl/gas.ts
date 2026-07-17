@@ -10,6 +10,7 @@
  */
 
 import { getPublicClient } from "../chain/client";
+import { throttledRpc } from "../chain/rpc-throttle";
 
 /** Whether to include gas costs in PnL (default: false = deduct gas). */
 export const PNL_INCLUDE_GAS =
@@ -38,7 +39,7 @@ export async function estimateGasCostQuote(
 
   try {
     const client = getPublicClient();
-    const receipt = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
+    const receipt = await throttledRpc(() => client.getTransactionReceipt({ hash: txHash as `0x${string}` }));
     if (!receipt) return 0;
 
     // gasUsed * effectiveGasPrice = gas cost in wei

@@ -78,6 +78,7 @@ export async function GET(
           lastUpdated: live.lastUpdated,
           protocol: meta.protocol,
           valuationMethod: live.valuationMethod,
+          pricingIncomplete: live.pricingIncomplete || undefined,
         };
       } catch (e) {
         console.warn("[live] position error", p.tokenId, e);

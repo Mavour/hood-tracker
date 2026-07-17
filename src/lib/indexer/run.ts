@@ -84,6 +84,7 @@ export type PositionView = PositionPnl & {
   explorerUrl: string;
   historyPending?: boolean;
   hasCustomHook?: boolean;
+  pricingIncomplete?: boolean;
 };
 
 export type TrackResult = {
@@ -382,6 +383,7 @@ async function buildOnePosition(
 
   let currentValueUsd = 0;
   let unclaimedFeesUsd = 0;
+  let pricingIncomplete = false;
 
   if (livePos && isOpen) {
     const principal = await valueDual(
@@ -398,6 +400,7 @@ async function buildOnePosition(
     );
     currentValueUsd = principal.usd;
     unclaimedFeesUsd = fees.usd;
+    pricingIncomplete = principal.pricingIncomplete || fees.pricingIncomplete;
   }
 
   // Closed with no events yet → still show a row (never drop from UI).
@@ -582,6 +585,7 @@ async function buildOnePosition(
     liquidity: (livePos?.liquidity ?? raw.liquidity).toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.npm}/instance/${tokenId}`,
     historyPending: opts.historyPending,
+    pricingIncomplete: pricingIncomplete || undefined,
   };
 
   if (isOpen) {
@@ -732,6 +736,7 @@ async function buildOneV4Position(
 
   let currentValueUsd = 0;
   let unclaimedFeesUsd = 0;
+  let pricingIncomplete = false;
   if (isOpen) {
     const principal = await valueDual(
       vp.amount0Human,
@@ -747,6 +752,7 @@ async function buildOneV4Position(
     );
     currentValueUsd = principal.usd;
     unclaimedFeesUsd = fees.usd;
+    pricingIncomplete = principal.pricingIncomplete || fees.pricingIncomplete;
   }
 
   const pnl = computePositionPnl({
@@ -848,6 +854,7 @@ async function buildOneV4Position(
     liquidity: vp.liquidity.toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.v4PositionManager}/instance/${vp.tokenId}`,
     hasCustomHook: vp.hasCustomHook,
+    pricingIncomplete: pricingIncomplete || undefined,
   };
 
   console.log(

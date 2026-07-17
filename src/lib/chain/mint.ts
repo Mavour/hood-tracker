@@ -14,7 +14,7 @@ import { getNpmAddress, ROBINHOOD } from "@config/contracts";
 import { getPublicClient } from "./client";
 import { getV4PositionManager } from "./v4/positions";
 import { getDeposit, saveDeposit, type DepositRecord } from "../db";
-import { throttled } from "./rpc-throttle";
+import { throttledRpc, throttledFetch } from "./rpc-throttle";
 
 /** V3 pool Mint event topic (Uniswap V3 pool) */
 const MINT_TOPIC =
@@ -100,7 +100,7 @@ async function findMintTxHash(
     const rpc = getRpcUrl();
     if (rpc.includes("alchemy")) {
       const res = await withTimeout(
-        fetch(rpc, {
+        throttledFetch(rpc, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -263,7 +263,7 @@ async function resolveV3MintDeposit(
   } | null = null;
   try {
     receipt = await withTimeout(
-      client.getTransactionReceipt({ hash: mint.txHash }),
+      throttledRpc(() => client.getTransactionReceipt({ hash: mint.txHash })),
       8_000,
     );
   } catch {
@@ -366,7 +366,7 @@ async function resolveV4MintDeposit(
   } | null = null;
   try {
     receipt = await withTimeout(
-      client.getTransactionReceipt({ hash: mint.txHash }),
+      throttledRpc(() => client.getTransactionReceipt({ hash: mint.txHash })),
       8_000,
     );
   } catch {
@@ -461,7 +461,7 @@ export async function getV4HistoricalAmounts(
 
     const client = getPublicClient();
     const stateView = getV4StateView();
-    const slot0 = await throttled(() => client.readContract({
+    const slot0 = await throttledRpc(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getSlot0",

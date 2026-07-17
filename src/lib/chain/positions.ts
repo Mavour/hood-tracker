@@ -4,7 +4,7 @@ import { npmAbi, factoryAbi, poolAbi, erc20Abi } from "./abis";
 import { getPublicClient } from "./client";
 import { getAmountsForLiquidity, humanAmount } from "./math";
 import { computeV3UnclaimedFees } from "./fees";
-import { throttled } from "./rpc-throttle";
+import { throttledRpc, throttledFetch } from "./rpc-throttle";
 
 export type PositionRaw = {
   tokenId: bigint;
@@ -78,9 +78,9 @@ export async function getTokenMeta(address: Address): Promise<TokenMeta> {
 
   const client = getPublicClient();
   try {
-    const symbol = await throttled(() => client.readContract({ address, abi: erc20Abi, functionName: "symbol" }));
-    const decimals = await throttled(() => client.readContract({ address, abi: erc20Abi, functionName: "decimals" }));
-    const name = await throttled(() => client
+    const symbol = await throttledRpc(() => client.readContract({ address, abi: erc20Abi, functionName: "symbol" }));
+    const decimals = await throttledRpc(() => client.readContract({ address, abi: erc20Abi, functionName: "decimals" }));
+    const name = await throttledRpc(() => client
       .readContract({ address, abi: erc20Abi, functionName: "name" })
       .catch(() => "Token"));
     const m: TokenMeta = {
@@ -110,7 +110,7 @@ async function listNpmTokenIdsAlchemy(owner: Address): Promise<bigint[] | null> 
   if (!rpc.includes("alchemy")) return null;
   const npm = getNpmAddress();
   try {
-    const res = await fetch(rpc, {
+    const res = await throttledFetch(rpc, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -169,7 +169,7 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
 
   const client = getPublicClient();
   const npm = getNpmAddress();
-  const bal = await throttled(() => client.readContract({
+  const bal = await throttledRpc(() => client.readContract({
     address: npm,
     abi: npmAbi,
     functionName: "balanceOf",
@@ -184,7 +184,7 @@ export async function listNpmTokenIds(owner: Address): Promise<bigint[]> {
   const CHUNK = 12;
   for (let i = 0; i < limit; i += CHUNK) {
     const slice = Array.from({ length: Math.min(CHUNK, limit - i) }, (_, j) =>
-      throttled(() => client.readContract({
+      throttledRpc(() => client.readContract({
         address: npm,
         abi: npmAbi,
         functionName: "tokenOfOwnerByIndex",
@@ -209,7 +209,7 @@ export async function readPosition(tokenId: bigint): Promise<PositionRaw | null>
   const client = getPublicClient();
   const npm = getNpmAddress();
   try {
-    const pos = await throttled(() => client.readContract({
+    const pos = await throttledRpc(() => client.readContract({
       address: npm,
       abi: npmAbi,
       functionName: "positions",
@@ -241,7 +241,7 @@ export async function resolvePool(
   const client = getPublicClient();
   const factory = getFactoryAddress();
   try {
-    const pool = await throttled(() => client.readContract({
+    const pool = await throttledRpc(() => client.readContract({
       address: factory,
       abi: factoryAbi,
       functionName: "getPool",
@@ -278,7 +278,7 @@ export async function getLivePosition(
   if (poolAddress && raw.liquidity > 0n) {
     const client = getPublicClient();
     try {
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: poolAddress,
         abi: poolAbi,
         functionName: "slot0",

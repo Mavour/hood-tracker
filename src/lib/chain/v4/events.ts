@@ -11,6 +11,7 @@ import { getV4PositionManager, getV4PoolManager, type LiveV4Position } from "./p
 import { getV4HistoricalAmounts } from "../mint";
 import { humanAmount } from "../math";
 import { getTokenMeta } from "../positions";
+import { throttledRpc } from "../rpc-throttle";
 
 const MODIFY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
@@ -99,7 +100,7 @@ async function fetchAllV4TransfersRpc(owner: string): Promise<V4Transfer[]> {
   const all: V4Transfer[] = [];
 
   try {
-    const latest = await withTimeout(client.getBlockNumber(), 5_000);
+    const latest = await withTimeout(throttledRpc(() => client.getBlockNumber()), 5_000);
     const from = latest > 2_000_000n ? latest - 2_000_000n : 0n;
     const ownerAddr = owner as Address;
 
@@ -115,23 +116,23 @@ async function fetchAllV4TransfersRpc(owner: string): Promise<V4Transfer[]> {
 
     const [logsTo, logsFrom] = await Promise.all([
       withTimeout(
-        client.getLogs({
+        throttledRpc(() => client.getLogs({
           address: posm as Hex,
           event: transferEvent,
           args: { to: ownerAddr },
           fromBlock: from,
           toBlock: latest,
-        }),
+        })),
         10_000,
       ).catch(() => []),
       withTimeout(
-        client.getLogs({
+        throttledRpc(() => client.getLogs({
           address: posm as Hex,
           event: transferEvent,
           args: { from: ownerAddr },
           fromBlock: from,
           toBlock: latest,
-        }),
+        })),
         10_000,
       ).catch(() => []),
     ]);
@@ -193,7 +194,7 @@ async function fetchTxLogsFromRpc(txHash: Hex): Promise<TxLogItem[] | null> {
   const client = getPublicClient();
   try {
     const receipt = await withTimeout(
-      client.getTransactionReceipt({ hash: txHash }),
+      throttledRpc(() => client.getTransactionReceipt({ hash: txHash })),
       8_000,
     );
     if (!receipt?.logs?.length) return null;
@@ -236,20 +237,20 @@ async function fetchModifyLiquidityHashesViaRpc(
   } as const;
 
   try {
-    const latest = await withTimeout(client.getBlockNumber(), 5_000);
+    const latest = await withTimeout(throttledRpc(() => client.getBlockNumber()), 5_000);
     // Alchemy free tier: max 10 block range per eth_getLogs call — this function is
     // now a supplement for very recent activity not yet indexed by Blockscout, not the
     // primary source.
     const from = latest > 9n ? latest - 9n : 0n;
 
     const logs = await withTimeout(
-      client.getLogs({
+      throttledRpc(() => client.getLogs({
         address: pm as Hex,
         event: modifyEvent,
         args: poolId ? { id: poolId } : undefined,
         fromBlock: from,
         toBlock: latest,
-      }),
+      })),
       12_000,
     );
 

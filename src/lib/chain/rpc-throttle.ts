@@ -2,17 +2,38 @@
  * Global RPC request throttle matching UniLP-Monitoring's approach:
  * - 25ms minimum delay between requests when using Alchemy
  * - Retry with exponential backoff on 429 errors
- * - Concurrency limiter for parallel RPC calls
+ * - Combined throttledRpc() = spacing + retry (the recommended wrapper)
+ * - throttledFetch() for raw HTTP calls (JSON-RPC, DexScreener, etc.)
  */
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const RPC_DELAY_MS = Number(process.env.RPC_REQUEST_DELAY_MS ?? 25);
-const isAlchemy = (process.env.ROBINHOOD_CHAIN_RPC ?? "")
-  .toLowerCase()
-  .includes("alchemy");
 
-const effectiveDelay = isAlchemy ? RPC_DELAY_MS : 0;
+/**
+ * Detect Alchemy from the resolved RPC URL (not a single env var).
+ * Uses lazy import to avoid circular dependency with client.ts.
+ */
+function detectAlchemy(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resolveRpcUrl } = require("./client") as { resolveRpcUrl: () => string };
+    return resolveRpcUrl().toLowerCase().includes("alchemy");
+  } catch {
+    return false;
+  }
+}
+
+let _effectiveDelay: number | null = null;
+function effectiveDelay(): number {
+  if (_effectiveDelay === null) {
+    _effectiveDelay = detectAlchemy() ? RPC_DELAY_MS : 0;
+    if (_effectiveDelay > 0) {
+      console.log(`[rpc] throttle active: ${_effectiveDelay}ms between requests (Alchemy detected)`);
+    }
+  }
+  return _effectiveDelay;
+}
 
 let lastRequestAt = 0;
 let throttleTail: Promise<unknown> = Promise.resolve();
@@ -22,12 +43,13 @@ let throttleTail: Promise<unknown> = Promise.resolve();
  * Matches UniLP-Monitoring's throttledGetLogs pattern.
  */
 export async function throttled<T>(fn: () => Promise<T>): Promise<T> {
-  if (effectiveDelay <= 0) return fn();
+  const delay = effectiveDelay();
+  if (delay <= 0) return fn();
 
   const run = throttleTail.then(async () => {
     const elapsed = Date.now() - lastRequestAt;
-    if (elapsed < effectiveDelay) {
-      await sleep(effectiveDelay - elapsed);
+    if (elapsed < delay) {
+      await sleep(delay - elapsed);
     }
     lastRequestAt = Date.now();
     return fn();
@@ -82,6 +104,39 @@ export async function retryOnTransient<T>(
     }
   }
   throw lastError;
+}
+
+/**
+ * Combined wrapper: spacing (throttle) + retry-with-backoff (transient errors).
+ * This is the recommended wrapper for ALL RPC calls going forward.
+ * Matches UniLP-Monitoring's throttledGetLogs pattern but generic for any RPC call.
+ */
+export async function throttledRpc<T>(fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
+  return retryOnTransient(() => throttled(fn), maxAttempts);
+}
+
+/**
+ * Combined wrapper for raw fetch() calls (JSON-RPC endpoints, DexScreener, etc.).
+ * Adds retry-with-backoff for HTTP 429/5xx errors.
+ */
+export async function throttledFetch(
+  url: string,
+  init?: RequestInit,
+  maxAttempts = 5,
+): Promise<Response> {
+  return retryOnTransient(
+    () =>
+      throttled(async () => {
+        const res = await fetch(url, init);
+        if (res.status === 429 || res.status >= 500) {
+          const err = new Error(`HTTP ${res.status}`) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+        return res;
+      }),
+    maxAttempts,
+  );
 }
 
 /**

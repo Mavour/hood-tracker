@@ -11,16 +11,20 @@ import { price0In1FromSqrt } from "../chain/math";
 import { getTokenMeta, resolvePool } from "../chain/positions";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
-import { throttled } from "../chain/rpc-throttle";
+import { throttledRpc, throttledFetch } from "../chain/rpc-throttle";
 
 export type DualPrice = {
   usd: number;
   eth: number;
   source: string;
+  /** false when price could not be resolved (RPC failure, no pool, etc.) */
+  ok: boolean;
 };
 
 const liveCache = new Map<string, { price: DualPrice; at: number }>();
 const LIVE_TTL = 20_000;
+/** Short TTL for failed lookups so a recovered RPC gets retried quickly. */
+const FAIL_TTL = 3_000;
 
 /**
  * Block-scoped price cache so we don't re-query the same (pool, block) twice
@@ -51,7 +55,7 @@ function isWeth(addr: string): boolean {
 
 async function fetchDexScreenerUsd(token: Address): Promise<number | null> {
   try {
-    const res = await fetch(
+    const res = await throttledFetch(
       `https://api.dexscreener.com/latest/dex/tokens/${token}`,
       { next: { revalidate: 30 } } as RequestInit,
     );
@@ -95,7 +99,7 @@ export async function ethUsdLive(): Promise<number> {
     const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
     if (pool) {
       const client = getPublicClient();
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
@@ -137,7 +141,7 @@ async function ethUsdAtBlock(blockNumber: bigint): Promise<number> {
     const pool = await resolvePool(ROBINHOOD.wrapped, ROBINHOOD.usdg, 500);
     if (pool) {
       const client = getPublicClient();
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
@@ -181,7 +185,7 @@ export async function getPairPriceLiveFromPool(
 ): Promise<{ price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number }> {
   try {
     const client = getPublicClient();
-    const slot0 = await throttled(() => client.readContract({
+    const slot0 = await throttledRpc(() => client.readContract({
       address: poolAddress,
       abi: poolAbi,
       functionName: "slot0",
@@ -239,8 +243,16 @@ export async function getPairPriceLiveFromPool(
   return { price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0 };
 }
 
+/** Cache helper: store price result with appropriate TTL based on success. */
+function cachePrice(key: string, price: DualPrice): void {
+  const ttl = price.ok ? LIVE_TTL : FAIL_TTL;
+  liveCache.set(key, { price, at: Date.now() - LIVE_TTL + ttl });
+}
+
 /**
  * Live dual price for a token.
+ * Each fee-tier attempt is individually try/caught so a single RPC failure
+ * doesn't abort the entire loop — the next fee tier is tried instead.
  */
 export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
   const key = token.toLowerCase();
@@ -253,25 +265,27 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
       usd: 1,
       eth: ethUsd > 0 ? 1 / ethUsd : 0,
       source: "stable",
+      ok: true,
     };
-    liveCache.set(key, { price, at: Date.now() });
+    cachePrice(key, price);
     return price;
   }
 
   if (isWeth(key)) {
     const ethUsd = await ethUsdLive();
-    const price: DualPrice = { usd: ethUsd, eth: 1, source: "weth" };
-    liveCache.set(key, { price, at: Date.now() });
+    const price: DualPrice = { usd: ethUsd, eth: 1, source: "weth", ok: true };
+    cachePrice(key, price);
     return price;
   }
 
-  // Try pool vs WETH — include custom fee tiers (Uniswap V3 fork allows arbitrary fees)
-  try {
-    for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
+  // Try pool vs WETH — include custom fee tiers (Uniswap V3 fork allows arbitrary fees).
+  // Each fee tier is individually try/caught so one RPC failure doesn't abort the loop.
+  for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
+    try {
       const pool = await resolvePool(token, ROBINHOOD.wrapped, fee);
       if (!pool) continue;
       const client = getPublicClient();
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
@@ -293,22 +307,24 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
           usd: priceInEth * ethUsd,
           eth: priceInEth,
           source: `pool-weth-${fee}`,
+          ok: true,
         };
-        liveCache.set(key, { price, at: Date.now() });
+        cachePrice(key, price);
         return price;
       }
+    } catch (e) {
+      console.warn(`[price] pool-weth-${fee} failed for ${token}`, e instanceof Error ? e.message : e);
+      continue; // try next fee tier
     }
-  } catch {
-    /* fall through */
   }
 
   // Pool vs USDG
-  try {
-    for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
+  for (const fee of [50000, 36900, 29900, 10000, 3000, 500, 100]) {
+    try {
       const pool = await resolvePool(token, ROBINHOOD.usdg, fee);
       if (!pool) continue;
       const client = getPublicClient();
-      const slot0 = await throttled(() => client.readContract({
+      const slot0 = await throttledRpc(() => client.readContract({
         address: pool,
         abi: poolAbi,
         functionName: "slot0",
@@ -330,13 +346,15 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
           usd: priceUsd,
           eth: ethUsd > 0 ? priceUsd / ethUsd : 0,
           source: `pool-usdg-${fee}`,
+          ok: true,
         };
-        liveCache.set(key, { price, at: Date.now() });
+        cachePrice(key, price);
         return price;
       }
+    } catch (e) {
+      console.warn(`[price] pool-usdg-${fee} failed for ${token}`, e instanceof Error ? e.message : e);
+      continue; // try next fee tier
     }
-  } catch {
-    /* fall through */
   }
 
   const ds = await fetchDexScreenerUsd(token);
@@ -346,13 +364,14 @@ export async function getTokenPriceLive(token: Address): Promise<DualPrice> {
       usd: ds,
       eth: ethUsd > 0 ? ds / ethUsd : 0,
       source: "dexscreener",
+      ok: true,
     };
-    liveCache.set(key, { price, at: Date.now() });
+    cachePrice(key, price);
     return price;
   }
 
-  const price: DualPrice = { usd: 0, eth: 0, source: "unknown" };
-  liveCache.set(key, { price, at: Date.now() });
+  const price: DualPrice = { usd: 0, eth: 0, source: "unavailable", ok: false };
+  cachePrice(key, price);
   return price;
 }
 
@@ -361,7 +380,7 @@ export async function valueDual(
   amount1: number,
   token0: Address,
   token1: Address,
-): Promise<{ usd: number; eth: number }> {
+): Promise<{ usd: number; eth: number; pricingIncomplete: boolean }> {
   const [p0, p1] = await Promise.all([
     getTokenPriceLive(token0),
     getTokenPriceLive(token1),
@@ -369,6 +388,7 @@ export async function valueDual(
   return {
     usd: amount0 * p0.usd + amount1 * p1.usd,
     eth: amount0 * p0.eth + amount1 * p1.eth,
+    pricingIncomplete: !p0.ok || !p1.ok,
   };
 }
 
@@ -395,7 +415,7 @@ export async function getPoolPriceAtBlock(
 
   try {
     const client = getPublicClient();
-    const slot0 = await throttled(() => client.readContract({
+    const slot0 = await throttledRpc(() => client.readContract({
       address: poolAddress,
       abi: poolAbi,
       functionName: "slot0",
@@ -490,7 +510,7 @@ export async function getV4PairPriceAtBlock(
   try {
     const client = getPublicClient();
     const stateView = getV4StateView();
-    const slot0 = await throttled(() => client.readContract({
+    const slot0 = await throttledRpc(() => client.readContract({
       address: stateView,
       abi: stateViewAbi,
       functionName: "getSlot0",
@@ -585,11 +605,11 @@ export async function getHistoricalPrice(
   const key = token.toLowerCase();
   if (isStable(key)) {
     const ethUsd = await ethUsdAtBlock(blockNumber);
-    return { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0, source: "block-stable" };
+    return { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0, source: "block-stable", ok: true };
   }
   if (isWeth(key)) {
     const ethUsd = await ethUsdAtBlock(blockNumber);
-    return { usd: ethUsd, eth: 1, source: "block-weth" };
+    return { usd: ethUsd, eth: 1, source: "block-weth", ok: true };
   }
   for (const quote of [ROBINHOOD.wrapped, ROBINHOOD.usdg]) {
     const pool = await resolvePool(token, quote, 500);
@@ -608,8 +628,8 @@ export async function getHistoricalPrice(
     const inEth = t0IsToken ? pair.price0Eth : pair.price1Eth;
     const inUsd = t0IsToken ? pair.price0Usd : pair.price1Usd;
     if (inEth > 0 || inUsd > 0) {
-      return { usd: inUsd, eth: inEth, source: `block-pool-${quote === ROBINHOOD.wrapped ? "weth" : "usdg"}` };
+      return { usd: inUsd, eth: inEth, source: `block-pool-${quote === ROBINHOOD.wrapped ? "weth" : "usdg"}`, ok: true };
     }
   }
-  return { usd: 0, eth: 0, source: "unavailable" };
+  return { usd: 0, eth: 0, source: "unavailable", ok: false };
 }

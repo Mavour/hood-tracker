@@ -13,7 +13,7 @@ import { getTokenPriceLive, getPairPriceLiveFromPool, ethUsdLive } from "../pric
 import { ttlGetOrSet } from "../cache/ttl";
 import { stateViewAbi } from "../chain/v4/abis";
 import { getV4StateView } from "../chain/v4/positions";
-import { throttled } from "../chain/rpc-throttle";
+import { throttledRpc } from "../chain/rpc-throttle";
 
 export type CachedPositionMeta = {
   tokenId: string;
@@ -47,6 +47,7 @@ export type LiveValueResult = {
   lastUpdated: string;
   /** "spot" = mark-to-market from pool slot0; "route_quote" = execution-aware swap quote */
   valuationMethod: "spot" | "route_quote";
+  pricingIncomplete?: boolean;
 };
 
 const SLOT0_TTL_MS = 10_000;
@@ -58,7 +59,7 @@ async function readSlot0(pool: Address): Promise<{
 }> {
   return ttlGetOrSet(`slot0:${pool.toLowerCase()}`, SLOT0_TTL_MS, async () => {
     const client = getPublicClient();
-    const slot0 = await throttled(() => client.readContract({
+    const slot0 = await throttledRpc(() => client.readContract({
       address: pool,
       abi: poolAbi,
       functionName: "slot0",
@@ -85,7 +86,7 @@ async function readTokensOwed(tokenId: bigint): Promise<{
     async () => {
       const client = getPublicClient();
       const npm = getNpmAddress();
-      const pos = await throttled(() => client.readContract({
+      const pos = await throttledRpc(() => client.readContract({
         address: npm,
         abi: npmAbi,
         functionName: "positions",
@@ -144,7 +145,7 @@ export async function getLiveValue(
         `v4slot0:${poolId.toLowerCase()}`,
         SLOT0_TTL_MS,
         async () => {
-          const s = await throttled(() => client.readContract({
+          const s = await throttledRpc(() => client.readContract({
             address: stateView,
             abi: stateViewAbi,
             functionName: "getSlot0",
@@ -177,13 +178,13 @@ export async function getLiveValue(
 
     if (liquidity > 0n) {
       try {
-        const inside = await throttled(() => client.readContract({
+        const inside = await throttledRpc(() => client.readContract({
           address: stateView,
           abi: stateViewAbi,
           functionName: "getFeeGrowthInside",
           args: [poolId, meta.tickLower, meta.tickUpper],
         }));
-        const posInfo = await throttled(() => client.readContract({
+        const posInfo = await throttledRpc(() => client.readContract({
           address: stateView,
           abi: stateViewAbi,
           functionName: "getPositionInfo",
@@ -255,6 +256,7 @@ export async function getLiveValue(
 
   let price0Usd: number;
   let price1Usd: number;
+  let pricingIncomplete = false;
 
   if (isV4 && slot0Ready) {
     const p0in1 = price0In1FromSqrt(slot0Sqrt, meta.decimals0, meta.decimals1);
@@ -295,6 +297,7 @@ export async function getLiveValue(
     ]);
     price0Usd = p0r.usd;
     price1Usd = p1r.usd;
+    pricingIncomplete = !p0r.ok || !p1r.ok;
   }
 
   const principalUsd = a0 * price0Usd + a1 * price1Usd;
@@ -317,5 +320,6 @@ export async function getLiveValue(
     amount1Human: a1,
     lastUpdated: new Date().toISOString(),
     valuationMethod: "spot",
+    pricingIncomplete,
   };
 }

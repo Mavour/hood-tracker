@@ -29,6 +29,7 @@ export type PositionRow = {
   poolAddress: string | null;
   hasCustomHook?: boolean;
   historyPending?: boolean;
+  pricingIncomplete?: boolean;
 };
 
 export function PositionList({
@@ -117,6 +118,14 @@ export function PositionList({
                       title="Pool has a custom Uniswap V4 hook — fee/PnL may be less precise"
                     >
                       ⚠ Custom Hook
+                    </span>
+                  )}
+                  {p.pricingIncomplete && (
+                    <span
+                      className="rounded-md bg-rh-neon/15 px-2 py-0.5 text-[10px] font-semibold text-rh-neon"
+                      title="One or more token prices could not be fetched — fee/position values may be incomplete"
+                    >
+                      ⚠ Fee price incomplete
                     </span>
                   )}
                   {p.pnlBps === null && (
