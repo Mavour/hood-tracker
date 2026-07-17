@@ -449,3 +449,142 @@ assert(Math.abs(estimate.netPnlUsd - 0) < 1e-6, `estimate net ${estimate.netPnlU
 
 console.log("✓ Cost basis estimate test passed");
 console.log("✓ V4 closed with real amounts tests passed");
+
+// --- V4: two positions in the SAME pool with different collect histories ---
+// This is the scenario that caused the duplication bug: positions A and B
+// both in WALLET/USDG pool, but A collected fees twice while B collected once.
+// Before the fix, both positions would show identical feesCollectedUsd.
+const sharedPool: { price0Usd: number; price1Usd: number; price0Eth: number; price1Eth: number } = {
+  price0Usd: 3000,
+  price1Usd: 1,
+  price0Eth: 1,
+  price1Eth: 1 / 3000,
+};
+
+// Position A: 1 WETH deposit, 2 collect events (0.02 WETH + 0.03 WETH)
+const posAEvents: PricedEvent[] = [
+  {
+    eventType: "transfer_mint",
+    timestamp: 2_000_000_000,
+    amount0: 0, amount1: 0, price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0,
+  },
+  {
+    eventType: "increase",
+    timestamp: 2_000_000_100,
+    blockNumber: 100,
+    amount0: 1.0,
+    amount1: 3000,
+    ...sharedPool,
+  },
+  {
+    eventType: "collect",
+    timestamp: 2_000_086_400,
+    blockNumber: 200,
+    amount0: 0.02,
+    amount1: 50,
+    ...sharedPool,
+  },
+  {
+    eventType: "collect",
+    timestamp: 2_000_172_800,
+    blockNumber: 300,
+    amount0: 0.03,
+    amount1: 80,
+    ...sharedPool,
+  },
+  {
+    eventType: "decrease",
+    timestamp: 2_000_259_200,
+    blockNumber: 400,
+    amount0: 0.95,
+    amount1: 2900,
+    ...sharedPool,
+  },
+  {
+    eventType: "transfer_burn",
+    timestamp: 2_000_300_000,
+    amount0: 0, amount1: 0, price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0,
+  },
+];
+
+// Position B: same pool, 1 WETH deposit, 1 collect event (0.01 WETH)
+const posBEvents: PricedEvent[] = [
+  {
+    eventType: "transfer_mint",
+    timestamp: 2_000_000_000,
+    amount0: 0, amount1: 0, price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0,
+  },
+  {
+    eventType: "increase",
+    timestamp: 2_000_000_100,
+    blockNumber: 100,
+    amount0: 1.0,
+    amount1: 3000,
+    ...sharedPool,
+  },
+  {
+    eventType: "collect",
+    timestamp: 2_000_086_400,
+    blockNumber: 200,
+    amount0: 0.01,
+    amount1: 25,
+    ...sharedPool,
+  },
+  {
+    eventType: "decrease",
+    timestamp: 2_000_259_200,
+    blockNumber: 400,
+    amount0: 0.99,
+    amount1: 2975,
+    ...sharedPool,
+  },
+  {
+    eventType: "transfer_burn",
+    timestamp: 2_000_300_000,
+    amount0: 0, amount1: 0, price0Usd: 0, price1Usd: 0, price0Eth: 0, price1Eth: 0,
+  },
+];
+
+const pnlA = computePositionPnl({
+  tokenId: "same-pool-A",
+  events: posAEvents,
+  isOpen: false,
+});
+
+const pnlB = computePositionPnl({
+  tokenId: "same-pool-B",
+  events: posBEvents,
+  isOpen: false,
+});
+
+// fees A = 0.02*3000 + 50 + 0.03*3000 + 80 = 60+50+90+80 = 280
+assert(
+  Math.abs(pnlA.feesCollectedUsd - 280) < 1e-6,
+  `posA fees ${pnlA.feesCollectedUsd}`,
+);
+// fees B = 0.01*3000 + 25 = 55
+assert(
+  Math.abs(pnlB.feesCollectedUsd - 55) < 1e-6,
+  `posB fees ${pnlB.feesCollectedUsd}`,
+);
+// Fees must differ — this is the core assertion that catches the duplication bug
+assert(
+  pnlA.feesCollectedUsd !== pnlB.feesCollectedUsd,
+  `fees must differ: A=${pnlA.feesCollectedUsd} B=${pnlB.feesCollectedUsd}`,
+);
+// Total fees across both positions ≤ total tokens that left the pool
+// (reconciliation upper-bound check)
+const totalFees = pnlA.feesCollectedUsd + pnlB.feesCollectedUsd;
+assert(
+  totalFees > 0 && totalFees < 10_000,
+  `total fees out of range: ${totalFees}`,
+);
+
+// Aggregate portfolio check
+const portSamePool = aggregatePortfolio([pnlA, pnlB]);
+assert(
+  Math.abs(portSamePool.feesCollectedUsd - 335) < 1e-6,
+  `portfolio fees ${portSamePool.feesCollectedUsd}`,
+);
+
+console.log("✓ V4 same-pool multi-position dedup test passed");

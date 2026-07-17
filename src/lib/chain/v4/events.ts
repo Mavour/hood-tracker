@@ -602,6 +602,20 @@ export async function fetchModifyLiquidityFromTxs(
     }
     if (!logs) continue;
 
+    // First pass: collect salts from ModifyLiquidity events in this tx.
+    // This lets us verify that ERC20 Transfers (fee collects) belong to this
+    // specific position rather than another position in the same pool.
+    const txModifySalts = new Set<string>();
+    for (const log of logs) {
+      if ((log.topics[0] ?? "") === MODIFY_TOPIC) {
+        const h = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
+        if (h.length >= 256) {
+          txModifySalts.add(h.slice(192, 256));
+        }
+      }
+    }
+    const txHasMySalt = txModifySalts.has(saltHex);
+
     for (const log of logs) {
       const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
 
@@ -631,10 +645,6 @@ export async function fetchModifyLiquidityFromTxs(
             log.blockNumber,
           );
           if (am) {
-            // Keep magnitude positive for both increase and decrease — compute.ts
-            // distinguishes deposit vs withdrawn via eventType, not sign (same
-            // convention as the V3 pipeline). Negating here made withdrawnUsd
-            // go negative for every closed V4 position.
             amount0 = am.amount0;
             amount1 = am.amount1;
           }
@@ -654,8 +664,11 @@ export async function fetchModifyLiquidityFromTxs(
         });
       }
 
-      // ERC20 Transfer — detect fee collections (incoming to owner)
-      if ((log.topics[0] ?? "") === TRANSFER_TOPIC && owner) {
+      // ERC20 Transfer — detect fee collections (incoming to owner).
+      // Only accept if this tx contains a ModifyLiquidity with THIS position's
+      // salt — otherwise the collect may belong to another position in the same
+      // pool (same token0/token1 pair) and would be misattributed.
+      if ((log.topics[0] ?? "") === TRANSFER_TOPIC && owner && txHasMySalt) {
         const ownerLc = owner.toLowerCase();
         const fromAddr = ("0x" + ((log.topics[1] ?? "").slice(26))).toLowerCase();
         const toAddr = ("0x" + ((log.topics[2] ?? "").slice(26))).toLowerCase();
