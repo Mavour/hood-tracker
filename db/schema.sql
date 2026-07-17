@@ -1,4 +1,5 @@
 -- Hood Tracker: cache/event store only — NOT a user identity DB
+-- Simplified to align with UniLP-Monitoring data model
 
 CREATE TABLE IF NOT EXISTS positions (
   token_id           BIGINT PRIMARY KEY,
@@ -10,109 +11,14 @@ CREATE TABLE IF NOT EXISTS positions (
   fee_tier           INT NOT NULL,
   tick_lower         INT NOT NULL,
   tick_upper         INT NOT NULL,
-  symbol0            TEXT,
-  symbol1            TEXT,
-  decimals0          INT DEFAULT 18,
-  decimals1          INT DEFAULT 18,
   status             TEXT DEFAULT 'open',
   liquidity          TEXT DEFAULT '0',
-  opened_at          TIMESTAMPTZ,
-  closed_at          TIMESTAMPTZ,
   opened_at_block    BIGINT,
   metadata           JSONB DEFAULT '{}',
-  last_indexed_block BIGINT DEFAULT 0,
   updated_at         TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_owner ON positions (owner_address);
-
-CREATE TABLE IF NOT EXISTS deposits (
-  token_id      BIGINT PRIMARY KEY,
-  protocol      TEXT NOT NULL DEFAULT 'v3', -- v3 | v4
-  amount0       TEXT NOT NULL DEFAULT '0', -- raw token base units (lossless)
-  amount1       TEXT NOT NULL DEFAULT '0',
-  block_number  BIGINT NOT NULL,
-  tx_hash       TEXT NOT NULL,
-  source        TEXT NOT NULL DEFAULT 'mint', -- mint | increase | estimate
-  resolved_at   TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_deposits_token ON deposits (token_id);
-
-CREATE TABLE IF NOT EXISTS position_events (
-  id           BIGSERIAL PRIMARY KEY,
-  token_id     BIGINT NOT NULL REFERENCES positions (token_id) ON DELETE CASCADE,
-  event_type   TEXT NOT NULL, -- increase | decrease | collect | transfer_mint | transfer_burn
-  block_number BIGINT NOT NULL,
-  tx_hash      TEXT NOT NULL,
-  log_index    INT NOT NULL DEFAULT 0,
-  timestamp    TIMESTAMPTZ NOT NULL,
-  amount0      NUMERIC DEFAULT 0,
-  amount1      NUMERIC DEFAULT 0,
-  price0_usd   NUMERIC,
-  price1_usd   NUMERIC,
-  price0_eth   NUMERIC,
-  price1_eth   NUMERIC,
-  value_usd    NUMERIC,
-  value_eth    NUMERIC,
-  UNIQUE (token_id, event_type, tx_hash, log_index)
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_token ON position_events (token_id);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON position_events (timestamp);
-
-CREATE TABLE IF NOT EXISTS daily_pnl_snapshot (
-  owner_address     TEXT NOT NULL,
-  date              DATE NOT NULL,
-  net_pnl_usd       NUMERIC DEFAULT 0,
-  net_pnl_eth       NUMERIC DEFAULT 0,
-  fee_pnl_usd       NUMERIC DEFAULT 0,
-  fee_pnl_eth       NUMERIC DEFAULT 0,
-  price_pnl_usd     NUMERIC DEFAULT 0,
-  price_pnl_eth     NUMERIC DEFAULT 0,
-  positions_opened  INT DEFAULT 0,
-  positions_closed  INT DEFAULT 0,
-  deposit_usd       NUMERIC DEFAULT 0,
-  withdraw_usd      NUMERIC DEFAULT 0,
-  PRIMARY KEY (owner_address, date)
-);
-
-CREATE TABLE IF NOT EXISTS price_cache (
-  token_address TEXT NOT NULL,
-  price_date    DATE NOT NULL,
-  price_usd     NUMERIC,
-  price_eth     NUMERIC,
-  source        TEXT,
-  PRIMARY KEY (token_address, price_date)
-);
-
-CREATE TABLE IF NOT EXISTS block_timestamps (
-  block_number BIGINT PRIMARY KEY,
-  timestamp    TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS index_jobs (
-  job_id           TEXT PRIMARY KEY,
-  owner_address    TEXT NOT NULL,
-  status           TEXT NOT NULL DEFAULT 'queued', -- queued | indexing | ready | error
-  progress         NUMERIC DEFAULT 0,
-  progress_message TEXT,
-  error_message    TEXT,
-  created_at       TIMESTAMPTZ DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ DEFAULT NOW(),
-  expires_at       TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_jobs_owner ON index_jobs (owner_address);
-
-CREATE TABLE IF NOT EXISTS address_pnl_cache (
-  owner_address  TEXT PRIMARY KEY,
-  summary_json   JSONB NOT NULL,
-  positions_json JSONB NOT NULL,
-  daily_json     JSONB NOT NULL,
-  computed_at    TIMESTAMPTZ DEFAULT NOW(),
-  expires_at     TIMESTAMPTZ NOT NULL
-);
 
 -- Cashflows: per-position monetary flows (aligned with UniLP-Monitoring)
 -- flow_type: 'deposit' | 'withdrawal' | 'fee'
@@ -153,11 +59,89 @@ CREATE TABLE IF NOT EXISTS close_history (
 CREATE INDEX IF NOT EXISTS idx_close_history_settled ON close_history (settled_at);
 CREATE INDEX IF NOT EXISTS idx_close_history_quote ON close_history (quote_token);
 
+-- Index job tracking (needed for tracker workflow)
+CREATE TABLE IF NOT EXISTS index_jobs (
+  job_id           TEXT PRIMARY KEY,
+  owner_address    TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'queued', -- queued | indexing | ready | error
+  progress         NUMERIC DEFAULT 0,
+  progress_message TEXT,
+  error_message    TEXT,
+  created_at       TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW(),
+  expires_at       TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_owner ON index_jobs (owner_address);
+
+-- PnL result cache (needed to avoid re-computation on every page load)
+CREATE TABLE IF NOT EXISTS address_pnl_cache (
+  owner_address  TEXT PRIMARY KEY,
+  summary_json   JSONB NOT NULL,
+  positions_json JSONB NOT NULL,
+  daily_json     JSONB NOT NULL,
+  computed_at    TIMESTAMPTZ DEFAULT NOW(),
+  expires_at     TIMESTAMPTZ NOT NULL
+);
+
+-- Position events (for position detail API)
+CREATE TABLE IF NOT EXISTS position_events (
+  id           BIGSERIAL PRIMARY KEY,
+  token_id     BIGINT NOT NULL REFERENCES positions (token_id) ON DELETE CASCADE,
+  event_type   TEXT NOT NULL,
+  block_number BIGINT NOT NULL,
+  tx_hash      TEXT NOT NULL,
+  log_index    INT NOT NULL DEFAULT 0,
+  timestamp    TIMESTAMPTZ NOT NULL,
+  amount0      NUMERIC DEFAULT 0,
+  amount1      NUMERIC DEFAULT 0,
+  price0_usd   NUMERIC,
+  price1_usd   NUMERIC,
+  value_usd    NUMERIC,
+  UNIQUE (token_id, event_type, tx_hash, log_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_token ON position_events (token_id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON position_events (timestamp);
+
+-- Deposit cache (for cost-basis resolution from mint tx)
+CREATE TABLE IF NOT EXISTS deposits (
+  token_id      BIGINT PRIMARY KEY,
+  protocol      TEXT NOT NULL DEFAULT 'v3',
+  amount0       TEXT NOT NULL DEFAULT '0',
+  amount1       TEXT NOT NULL DEFAULT '0',
+  block_number  BIGINT NOT NULL,
+  tx_hash       TEXT NOT NULL,
+  source        TEXT NOT NULL DEFAULT 'mint',
+  resolved_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deposits_token ON deposits (token_id);
+
 -- ── Migrations: safe ALTER TABLE for existing databases ────────────
 -- These use IF NOT EXISTS so they're idempotent (safe to run on new + existing DBs).
 
-ALTER TABLE positions ADD COLUMN IF NOT EXISTS quote_token   TEXT;
-ALTER TABLE positions ADD COLUMN IF NOT EXISTS status        TEXT DEFAULT 'open';
-ALTER TABLE positions ADD COLUMN IF NOT EXISTS liquidity     TEXT DEFAULT '0';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS quote_token    TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS status         TEXT DEFAULT 'open';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS liquidity      TEXT DEFAULT '0';
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS opened_at_block BIGINT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS metadata      JSONB DEFAULT '{}';
+
+-- Remove columns not in UniLP (safe to run on existing DBs — errors suppressed)
+ALTER TABLE positions DROP COLUMN IF EXISTS symbol0;
+ALTER TABLE positions DROP COLUMN IF EXISTS symbol1;
+ALTER TABLE positions DROP COLUMN IF EXISTS decimals0;
+ALTER TABLE positions DROP COLUMN IF EXISTS decimals1;
+ALTER TABLE positions DROP COLUMN IF EXISTS opened_at;
+ALTER TABLE positions DROP COLUMN IF EXISTS closed_at;
+ALTER TABLE positions DROP COLUMN IF EXISTS last_indexed_block;
+
+-- Remove price0_eth/price1_eth from position_events (no ETH pricing in UniLP)
+ALTER TABLE position_events DROP COLUMN IF EXISTS price0_eth;
+ALTER TABLE position_events DROP COLUMN IF EXISTS price1_eth;
+ALTER TABLE position_events DROP COLUMN IF EXISTS value_eth;
+
+-- Drop unused tables
+DROP TABLE IF EXISTS daily_pnl_snapshot CASCADE;
+DROP TABLE IF EXISTS price_cache CASCADE;
+DROP TABLE IF EXISTS block_timestamps CASCADE;

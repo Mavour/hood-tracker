@@ -6,6 +6,7 @@
 import { Pool, type QueryResultRow } from "pg";
 import { getMem, persistJobs, persistPnlCache } from "./memory";
 
+
 let pool: Pool | null = null;
 let useMemory = false;
 let initPromise: Promise<void> | null = null;
@@ -307,9 +308,6 @@ export async function savePosition(row: {
   symbol1: string;
   decimals0: number;
   decimals1: number;
-  openedAt: string | null;
-  closedAt: string | null;
-  lastIndexedBlock: number;
   quoteToken?: string | null;
   status?: string;
   liquidity?: string;
@@ -317,29 +315,30 @@ export async function savePosition(row: {
   metadata?: Record<string, unknown>;
 }): Promise<void> {
   await initDb();
+  const meta = {
+    ...(row.metadata ?? {}),
+    symbol0: row.symbol0,
+    symbol1: row.symbol1,
+    decimals0: row.decimals0,
+    decimals1: row.decimals1,
+  };
   if (useMemory || !getPool()) {
-    mem().positions.set(row.tokenId, row);
+    mem().positions.set(row.tokenId, { ...row, metadata: meta });
     return;
   }
   await query(
     `INSERT INTO positions (
       token_id, owner_address, pool_address, token0, token1, quote_token, fee_tier,
-      tick_lower, tick_upper, symbol0, symbol1, decimals0, decimals1,
-      status, liquidity, opened_at, closed_at, opened_at_block, metadata, last_indexed_block, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
+      tick_lower, tick_upper, status, liquidity, opened_at_block, metadata, updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
     ON CONFLICT (token_id) DO UPDATE SET
       owner_address = EXCLUDED.owner_address,
       pool_address = EXCLUDED.pool_address,
       quote_token = COALESCE(EXCLUDED.quote_token, positions.quote_token),
       status = COALESCE(EXCLUDED.status, positions.status),
       liquidity = COALESCE(EXCLUDED.liquidity, positions.liquidity),
-      opened_at = COALESCE(EXCLUDED.opened_at, positions.opened_at),
-      closed_at = EXCLUDED.closed_at,
       opened_at_block = COALESCE(EXCLUDED.opened_at_block, positions.opened_at_block),
       metadata = COALESCE(EXCLUDED.metadata, positions.metadata),
-      last_indexed_block = EXCLUDED.last_indexed_block,
-      symbol0 = EXCLUDED.symbol0,
-      symbol1 = EXCLUDED.symbol1,
       updated_at = NOW()`,
     [
       row.tokenId,
@@ -351,17 +350,10 @@ export async function savePosition(row: {
       row.feeTier,
       row.tickLower,
       row.tickUpper,
-      row.symbol0,
-      row.symbol1,
-      row.decimals0,
-      row.decimals1,
       row.status ?? "open",
       row.liquidity ?? "0",
-      row.openedAt,
-      row.closedAt,
       row.openedAtBlock ?? null,
-      JSON.stringify(row.metadata ?? {}),
-      row.lastIndexedBlock,
+      JSON.stringify(meta),
     ],
   );
 }
@@ -378,10 +370,7 @@ export async function saveEvents(
     amount1: number;
     price0Usd: number | null;
     price1Usd: number | null;
-    price0Eth: number | null;
-    price1Eth: number | null;
     valueUsd: number | null;
-    valueEth: number | null;
   }>,
 ): Promise<void> {
   await initDb();
@@ -401,8 +390,8 @@ export async function saveEvents(
     await query(
       `INSERT INTO position_events (
         token_id, event_type, block_number, tx_hash, log_index, timestamp,
-        amount0, amount1, price0_usd, price1_usd, price0_eth, price1_eth, value_usd, value_eth
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        amount0, amount1, price0_usd, price1_usd, value_usd
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT (token_id, event_type, tx_hash, log_index) DO NOTHING`,
       [
         e.tokenId,
@@ -415,10 +404,7 @@ export async function saveEvents(
         e.amount1,
         e.price0Usd,
         e.price1Usd,
-        e.price0Eth,
-        e.price1Eth,
         e.valueUsd,
-        e.valueEth,
       ],
     );
   }

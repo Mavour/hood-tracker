@@ -20,11 +20,9 @@ import { Button } from "./ui/button";
 export type DayPnl = {
   date: string;
   netPnlUsd: number;
-  netPnlEth: number;
-  feePnlUsd?: number;
-  feePnlEth?: number;
-  pricePnlUsd?: number;
-  pricePnlEth?: number;
+  depositUsd?: number;
+  withdrawUsd?: number;
+  feesUsd?: number;
   positionsOpened?: number;
   positionsClosed?: number;
   eventCount?: number;
@@ -80,11 +78,10 @@ export function PnlCalendar({
   const maxAbs = useMemo(() => {
     let m = 0;
     for (const d of daily) {
-      const v = currency === "usd" ? d.netPnlUsd : d.netPnlEth;
-      m = Math.max(m, Math.abs(v));
+      m = Math.max(m, Math.abs(d.netPnlUsd));
     }
     return m || 1;
-  }, [daily, currency]);
+  }, [daily]);
 
   const monthStart = startOfMonth(cursor);
   const monthEnd = endOfMonth(cursor);
@@ -92,7 +89,6 @@ export function PnlCalendar({
   const gridEnd = endOfWeek(monthEnd, { weekStartsOn: 1 });
   const days = eachDayOfInterval({ start: gridStart, end: gridEnd });
 
-  // Monthly aggregates (UniLP-Monitoring style)
   const monthStats = useMemo(() => {
     const mKey = format(cursor, "yyyy-MM");
     let totalPnl = 0;
@@ -101,16 +97,15 @@ export function PnlCalendar({
     let activeDays = 0;
     for (const d of daily) {
       if (!d.date.startsWith(mKey)) continue;
-      const v = currency === "usd" ? d.netPnlUsd : d.netPnlEth;
-      totalPnl += v;
+      totalPnl += d.netPnlUsd;
       const cc = d.closeCount ?? 0;
       const wc = d.winCount ?? 0;
       totalClose += cc;
       totalWin += wc;
-      if (cc > 0 || Math.abs(v) > 1e-12) activeDays += 1;
+      if (cc > 0 || Math.abs(d.netPnlUsd) > 1e-12) activeDays += 1;
     }
     return { totalPnl, totalClose, totalWin, activeDays };
-  }, [daily, cursor, currency]);
+  }, [daily, cursor]);
 
   return (
     <div className="rh-card flex h-full flex-col p-4 sm:p-5">
@@ -141,7 +136,7 @@ export function PnlCalendar({
         </div>
       </div>
 
-      {/* Summary bar (UniLP-Monitoring style) */}
+      {/* Summary bar */}
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] pb-2 text-[11px]">
         <span
           className={cn(
@@ -190,11 +185,7 @@ export function PnlCalendar({
           const key = format(day, "yyyy-MM-dd");
           const data = byDate.get(key);
           const inMonth = isSameMonth(day, cursor);
-          const value = data
-            ? currency === "usd"
-              ? data.netPnlUsd
-              : data.netPnlEth
-            : 0;
+          const value = data ? data.netPnlUsd : 0;
           const a = data ? intensity(value, maxAbs) : 0;
           const isProfit = value > 0;
           const isLoss = value < 0;

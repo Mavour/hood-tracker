@@ -1,6 +1,6 @@
 /**
  * Process-wide singleton memory store.
- * Next.js can re-evaluate modules on HMR; globalThis keeps jobs/cache alive.
+ * Simplified to match UniLP-Monitoring — removed deposits/events ETH fields.
  */
 
 import fs from "fs";
@@ -9,7 +9,6 @@ import path from "path";
 export type MemStore = {
   positions: Map<string, Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
-  daily: Map<string, Record<string, unknown>>;
   jobs: Map<string, Record<string, unknown>>;
   pnlCache: Map<string, Record<string, unknown>>;
   deposits: Map<string, Record<string, unknown>>;
@@ -67,7 +66,6 @@ export function getMem(): MemStore {
     g.__hoodTrackerMem = {
       positions: new Map(),
       events: [],
-      daily: new Map(),
       jobs: loadMapFile(JOBS_FILE),
       pnlCache: loadMapFile(CACHE_FILE),
       deposits: new Map(),

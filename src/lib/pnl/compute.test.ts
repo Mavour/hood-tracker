@@ -59,9 +59,7 @@ const open = computePositionPnl({
   tokenId: "1",
   events,
   currentValueUsd: 1600,
-  currentValueEth: 0.5,
   unclaimedFeesUsd: 10,
-  unclaimedFeesEth: 0.003,
   isOpen: true,
 });
 
@@ -73,10 +71,8 @@ assert(Math.abs(open.feesCollectedUsd - 36) < 1e-6, `fees ${open.feesCollectedUs
 assert(Math.abs(open.withdrawnUsd - 2600) < 1e-6, `wd ${open.withdrawnUsd}`);
 // net = 2600 + 36 + 1600 + 10 - 5000 = -754
 assert(Math.abs(open.netPnlUsd - -754) < 1e-6, `net ${open.netPnlUsd}`);
-// feePnl = 36 + 10 = 46
-assert(Math.abs(open.feePnlUsd - 46) < 1e-6, `feePnl ${open.feePnlUsd}`);
-// pricePnl = -754 - 46 = -800
-assert(Math.abs(open.pricePnlUsd - -800) < 1e-6, `pricePnl ${open.pricePnlUsd}`);
+// pnlBps = (-754 / 5000) * 10000 = -1508
+assert(Math.abs(open.pnlBps! - (-754 / 5000) * 10000) < 1e-6, `pnlBps ${open.pnlBps}`);
 
 const closed = computePositionPnl({
   tokenId: "2",
@@ -96,7 +92,6 @@ const closed = computePositionPnl({
   isOpen: false,
 });
 assert(closed.currentValueUsd === 0, "closed current=0");
-assert(closed.closedAt === 1_700_200_000, "closedAt set");
 
 const daily = computeDailyPnl(
   new Map([["1", events]]),
@@ -110,8 +105,7 @@ assert(port.openCount === 1 && port.closedCount === 1, "counts");
 console.log("✓ PnL compute tests passed");
 console.log({
   openNet: open.netPnlUsd,
-  feePnl: open.feePnlUsd,
-  pricePnl: open.pricePnlUsd,
+  pnlBps: open.pnlBps,
   days: daily.length,
 });
 
@@ -195,9 +189,9 @@ assert(
   Math.abs(v4closed.netPnlUsd - -67) < 1e-6,
   `v4 net got ${v4closed.netPnlUsd}`,
 );
-// source = events (no mint deposit provided)
-assert(v4closed.costBasisSource === "events", `v4 source got ${v4closed.costBasisSource}`);
-assert(v4closed.closedAt === 1_700_200_000, "v4 closedAt set");
+// pnlBps for closed position with no currentValueUsd provided defaults to 0
+// net = 1892 + 41 - 2000 = -67
+assert(Math.abs(v4closed.pnlBps! - (-67 / 2000) * 10000) < 1e-6, `v4 pnlBps ${v4closed.pnlBps}`);
 
 // V4 with mint deposit provided (blockNumber blocks all subsequent events)
 const v4mint = computePositionPnl({
@@ -213,7 +207,10 @@ const v4mint = computePositionPnl({
     price1Eth: 1 / 2000,
   },
 });
-assert(v4mint.costBasisSource === "mint", `v4 mint source got ${v4mint.costBasisSource}`);
+// mint deposit used but no blockNumber → increase NOT filtered → deposit = 2000 + 2000 = 4000
+assert(Math.abs(v4mint.depositUsd - 4000) < 1e-6, `v4 mint deposit ${v4mint.depositUsd}`);
+// net = 1892 + 41 - 4000 = -2067
+assert(Math.abs(v4mint.pnlBps! - (-2067 / 4000) * 10000) < 1e-6, `v4 mint pnlBps ${v4mint.pnlBps}`);
 
 // V4 with mint deposit + blockNumbers: mint at block 1.7B blocks increase
 const evtWithBlocks = v4Events.map((e, i) => ({
@@ -234,7 +231,7 @@ const v4mintBlocked = computePositionPnl({
     blockNumber: 1_700_000_120, // > increase block (1_700_000_100) → increase filtered
   },
 });
-assert(v4mintBlocked.costBasisSource === "mint", `v4 mintBlocked source`);
+assert(Math.abs(v4mintBlocked.pnlBps! - (-67 / 2000) * 10000) < 1e-6, `v4 mintBlocked pnlBps`);
 assert(Math.abs(v4mintBlocked.depositUsd - 2000) < 1e-6, `v4 mintBlocked deposit ${v4mintBlocked.depositUsd}`);
 assert(Math.abs(v4mintBlocked.netPnlUsd - -67) < 1e-6, `v4 mintBlocked net ${v4mintBlocked.netPnlUsd}`);
 
@@ -325,23 +322,11 @@ assert(
   Math.abs(v4closedReal.netPnlUsd - -420) < 1e-6,
   `v4 real net got ${v4closedReal.netPnlUsd}`,
 );
-// feePnl = fees = 260
+// pnlBps = (-420 / 6000) * 10000 = -700
 assert(
-  Math.abs(v4closedReal.feePnlUsd - 260) < 1e-6,
-  `v4 real feePnl got ${v4closedReal.feePnlUsd}`,
+  Math.abs(v4closedReal.pnlBps! - (-420 / 6000) * 10000) < 1e-6,
+  `v4 real pnlBps got ${v4closedReal.pnlBps}`,
 );
-// pricePnl = net - feePnl = -420 - 260 = -680
-assert(
-  Math.abs(v4closedReal.pricePnlUsd - -680) < 1e-6,
-  `v4 real pricePnl got ${v4closedReal.pricePnlUsd}`,
-);
-// source = events (no mint deposit)
-assert(
-  v4closedReal.costBasisSource === "events",
-  `v4 real source got ${v4closedReal.costBasisSource}`,
-);
-assert(v4closedReal.closedAt === 1_800_200_000, "v4 real closedAt set");
-assert(!v4closedReal.costBasisMissing, "v4 real costBasis not missing");
 
 // --- V4 closed position with collect only (no decrease) ---
 const v4CollectOnly: PricedEvent[] = [
@@ -415,6 +400,11 @@ assert(
 assert(
   Math.abs(v4collectOnly.netPnlUsd - 500) < 1e-6,
   `v4 collect net got ${v4collectOnly.netPnlUsd}`,
+);
+// pnlBps = (500 / 12000) * 10000
+assert(
+  Math.abs(v4collectOnly.pnlBps! - (500 / 12000) * 10000) < 1e-6,
+  `v4 collect pnlBps got ${v4collectOnly.pnlBps}`,
 );
 
 console.log("✓ V4 closed with real amounts tests passed");

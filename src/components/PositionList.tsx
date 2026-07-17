@@ -19,26 +19,14 @@ export type PositionRow = {
   isOpen: boolean;
   inRange: boolean | null;
   netPnlUsd: number;
-  netPnlEth: number;
-  feePnlUsd: number;
-  feePnlEth: number;
-  pricePnlUsd: number;
-  pricePnlEth: number;
   depositUsd: number;
-  depositEth: number;
   withdrawnUsd?: number;
-  withdrawnEth?: number;
   currentValueUsd: number;
-  currentValueEth: number;
   feesCollectedUsd?: number;
-  feesCollectedEth?: number;
   unclaimedFeesUsd?: number;
-  unclaimedFeesEth?: number;
-  pnlPctUsd: number | null;
-  pnlPctEth: number | null;
+  pnlBps: number | null;
   explorerUrl: string;
   poolAddress: string | null;
-  costBasisEstimated?: boolean;
   hasCustomHook?: boolean;
   historyPending?: boolean;
 };
@@ -65,13 +53,9 @@ export function PositionList({
   return (
     <div className={cn("space-y-3", compact && "space-y-2")}>
       {positions.map((p) => {
-        const net = currency === "usd" ? p.netPnlUsd : p.netPnlEth;
-        const dep = currency === "usd" ? p.depositUsd : p.depositEth;
-        const cur =
-          currency === "usd" ? p.currentValueUsd : p.currentValueEth;
-        const pct = currency === "usd" ? p.pnlPctUsd : p.pnlPctEth;
-        const fee = currency === "usd" ? p.feePnlUsd : p.feePnlEth;
-        const price = currency === "usd" ? p.pricePnlUsd : p.pricePnlEth;
+        const net = p.netPnlUsd;
+        const dep = p.depositUsd;
+        const cur = p.currentValueUsd;
 
         return (
           <div
@@ -135,7 +119,7 @@ export function PositionList({
                       ⚠ Custom Hook
                     </span>
                   )}
-                  {p.costBasisEstimated && (
+                  {p.pnlBps === null && (
                     <span className="rounded-md bg-rh-elevated px-2 py-0.5 text-[10px] text-rh-muted">
                       no cost basis
                     </span>
@@ -158,7 +142,9 @@ export function PositionList({
                 >
                   {formatSigned(net, currency)}
                 </p>
-                <p className="text-xs text-rh-muted">{formatPct(pct)}</p>
+                <p className="text-xs text-rh-muted">
+                  {formatPct(p.pnlBps !== null ? p.pnlBps / 100 : null)}
+                </p>
               </div>
             </div>
 
@@ -173,7 +159,7 @@ export function PositionList({
               <Stat
                 label="Deposit"
                 value={
-                  p.costBasisEstimated || dep === 0
+                  p.pnlBps === null || dep === 0
                     ? "—"
                     : formatSigned(dep, currency).replace(/^\+/, "")
                 }
@@ -182,9 +168,7 @@ export function PositionList({
                 <Stat
                   label="Withdrawn"
                   value={formatSigned(
-                    currency === "usd"
-                      ? (p.withdrawnUsd ?? 0)
-                      : (p.withdrawnEth ?? 0),
+                    (p.withdrawnUsd ?? 0),
                     currency,
                   ).replace(/^\+/, "")}
                 />
@@ -197,9 +181,7 @@ export function PositionList({
               <Stat
                 label="Claimed fees"
                 value={formatSigned(
-                  currency === "usd"
-                    ? (p.feesCollectedUsd ?? 0)
-                    : (p.feesCollectedEth ?? 0),
+                  (p.feesCollectedUsd ?? 0),
                   currency,
                 )}
               />
@@ -207,32 +189,12 @@ export function PositionList({
                 <Stat
                   label="Unclaimed"
                   value={formatSigned(
-                    currency === "usd"
-                      ? (p.unclaimedFeesUsd ?? 0)
-                      : (p.unclaimedFeesEth ?? 0),
+                    (p.unclaimedFeesUsd ?? 0),
                     currency,
                   )}
                 />
               )}
-              {!compact && (
-                <>
-                  <Stat label="Fee PnL" value={formatSigned(fee, currency)} />
-                  <Stat
-                    label={p.costBasisEstimated ? "Net*" : "Price / IL"}
-                    value={
-                      p.costBasisEstimated
-                        ? formatSigned(net, currency)
-                        : formatSigned(price, currency)
-                    }
-                  />
-                </>
-              )}
             </div>
-            {p.costBasisEstimated && (
-              <p className="mt-2 text-[10px] text-rh-red/80">
-                Cost basis not found yet — deposit/history may still be loading.
-              </p>
-            )}
             {p.historyPending && (
               <p className="mt-1 text-[10px] text-rh-cyan/90">
                 Closed history pending background index…

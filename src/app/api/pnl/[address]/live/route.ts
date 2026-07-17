@@ -51,11 +51,8 @@ export async function GET(
           symbol1: String(p.symbol1 ?? "T1"),
           fee: Number(p.fee ?? 0),
           depositUsd: Number(p.depositUsd ?? 0),
-          depositEth: Number(p.depositEth ?? 0),
           feesCollectedUsd: Number(p.feesCollectedUsd ?? 0),
-          feesCollectedEth: Number(p.feesCollectedEth ?? 0),
           withdrawnUsd: Number(p.withdrawnUsd ?? 0),
-          withdrawnEth: Number(p.withdrawnEth ?? 0),
           protocol: (p.protocol as "v3" | "v4") ?? "v3",
           poolId: (p.poolId as string) ?? null,
         };
@@ -70,22 +67,15 @@ export async function GET(
           tokenId: meta.tokenId,
           pool: `${meta.symbol0}/${meta.symbol1} ${feeTierLabel(meta.fee)}`,
           depositValueUsd: meta.depositUsd,
-          depositValueEth: meta.depositEth,
           currentValueUsd: live.currentValueUsd + live.feeUnclaimedUsd,
-          currentValueEth: live.currentValueEth + live.feeUnclaimedEth,
           principalUsd: live.principalUsd,
-          principalEth: live.principalEth,
           unrealizedPnlUsd: live.unrealizedPnlUsd,
-          unrealizedPnlEth: live.unrealizedPnlEth,
           feeUnclaimedUsd: live.feeUnclaimedUsd,
-          feeUnclaimedEth: live.feeUnclaimedEth,
           feesCollectedUsd: meta.feesCollectedUsd,
-          feesCollectedEth: meta.feesCollectedEth,
           inRange: live.inRange,
           amount0Human: live.amount0Human,
           amount1Human: live.amount1Human,
           lastUpdated: live.lastUpdated,
-          costBasisEstimated: Boolean(p.costBasisEstimated) || Boolean(live.depositMissing),
           protocol: meta.protocol,
         };
       } catch (e) {
@@ -100,27 +90,20 @@ export async function GET(
   >[];
 
   const unrealizedPnlUsd = rows.reduce((s, r) => s + r.unrealizedPnlUsd, 0);
-  const unrealizedPnlEth = rows.reduce((s, r) => s + r.unrealizedPnlEth, 0);
   const openValueUsd = rows.reduce((s, r) => s + r.currentValueUsd, 0);
-  const openValueEth = rows.reduce((s, r) => s + r.currentValueEth, 0);
 
   // Realized from cache summary if present
   const summary = cache.summary as Record<string, number>;
   const realizedPnlUsd = Number(summary?.realizedPnlUsd ?? 0);
-  const realizedPnlEth = Number(summary?.realizedPnlEth ?? 0);
 
   return NextResponse.json({
     address: address.toLowerCase(),
     positions: rows,
     totals: {
       unrealizedPnlUsd,
-      unrealizedPnlEth,
       realizedPnlUsd,
-      realizedPnlEth,
       totalPnlUsd: realizedPnlUsd + unrealizedPnlUsd,
-      totalPnlEth: realizedPnlEth + unrealizedPnlEth,
       openValueUsd,
-      openValueEth,
       openCount: rows.length,
     },
     lastUpdated: new Date().toISOString(),

@@ -82,9 +82,6 @@ export type PositionView = PositionPnl & {
   amount1Human: number;
   liquidity: string;
   explorerUrl: string;
-  costBasisEstimated?: boolean;
-  realizedPnlUsd?: number;
-  unrealizedPnlUsd?: number;
   historyPending?: boolean;
   hasCustomHook?: boolean;
 };
@@ -383,9 +380,7 @@ async function buildOnePosition(
   }
 
   let currentValueUsd = 0;
-  let currentValueEth = 0;
   let unclaimedFeesUsd = 0;
-  let unclaimedFeesEth = 0;
 
   if (livePos && isOpen) {
     const principal = await valueDual(
@@ -401,15 +396,8 @@ async function buildOnePosition(
       token1,
     );
     currentValueUsd = principal.usd;
-    currentValueEth = principal.eth;
     unclaimedFeesUsd = fees.usd;
-    unclaimedFeesEth = fees.eth;
   }
-
-  const hasIncrease = priced.some(
-    (e) => e.eventType === "increase" && (e.amount0 > 0 || e.amount1 > 0),
-  );
-  const costBasisEstimated = !hasIncrease && !mintDeposit;
 
   // Closed with no events yet → still show a row (never drop from UI).
   if (!isOpen && priced.length === 0) {
@@ -436,24 +424,14 @@ async function buildOnePosition(
       amount1Human: 0,
       liquidity: "0",
       explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.npm}/instance/${tokenId}`,
-      costBasisEstimated: true,
       historyPending: opts.historyPending || !opts.fetchEvents,
-      realizedPnlUsd: 0,
-      unrealizedPnlUsd: 0,
     };
     return { view, pnl: stubPnl, priced: [] };
   }
 
-  let openedTs: number | null = null;
   let closedTs: number | null = null;
   for (const e of priced) {
     if (!e.timestamp || e.timestamp < 1_000_000_000) continue;
-    if (
-      (e.eventType === "increase" || e.eventType === "transfer_mint") &&
-      (openedTs == null || e.timestamp < openedTs)
-    ) {
-      openedTs = e.timestamp;
-    }
     if (
       !isOpen &&
       (e.eventType === "decrease" ||
@@ -468,18 +446,10 @@ async function buildOnePosition(
     tokenId: tokenId.toString(),
     events: priced,
     currentValueUsd,
-    currentValueEth,
     unclaimedFeesUsd,
-    unclaimedFeesEth,
     isOpen,
     mintDeposit,
   });
-  if (!isOpen && pnl.closedAt == null && closedTs) {
-    (pnl as { closedAt: number | null }).closedAt = closedTs;
-  }
-  if (pnl.openedAt == null && openedTs) {
-    (pnl as { openedAt: number | null }).openedAt = openedTs;
-  }
 
   // ── Cashflow reconstruction + settlement finalization ──
   // Runs when events are available (enrichment/backfill phase)
@@ -538,9 +508,7 @@ async function buildOnePosition(
           quoteToken,
           protocol: "v3",
           status: isOpen ? "open" : "closing",
-          openedAtBlock: openedTs
-            ? Math.floor(openedTs / 0.25) // approximate block from timestamp
-            : null,
+          openedAtBlock: null,
         });
 
         await finalizeCloseHistory(positionId);
@@ -549,15 +517,6 @@ async function buildOnePosition(
       }
     }
   }
-
-  const openedAt =
-    pnl.openedAt != null ? new Date(pnl.openedAt * 1000).toISOString() : null;
-  const closedAt =
-    !isOpen && pnl.closedAt != null
-      ? new Date(pnl.closedAt * 1000).toISOString()
-      : !isOpen && closedTs
-        ? new Date(closedTs * 1000).toISOString()
-        : null;
 
   await savePosition({
     tokenId: tokenId.toString(),
@@ -572,9 +531,6 @@ async function buildOnePosition(
     symbol1: livePos?.symbol1 ?? meta1.symbol,
     decimals0: meta0.decimals,
     decimals1: meta1.decimals,
-    openedAt,
-    closedAt,
-    lastIndexedBlock: Number(latest),
   });
 
   if (priced.length) {
@@ -593,10 +549,7 @@ async function buildOnePosition(
         amount1: e.amount1,
         price0Usd: e.price0Usd,
         price1Usd: e.price1Usd,
-        price0Eth: e.price0Eth,
-        price1Eth: e.price1Eth,
         valueUsd: e.amount0 * e.price0Usd + e.amount1 * e.price1Usd,
-        valueEth: e.amount0 * e.price0Eth + e.amount1 * e.price1Eth,
       })),
     );
   }
@@ -619,19 +572,13 @@ async function buildOnePosition(
     amount1Human: livePos?.amount1Human ?? 0,
     liquidity: (livePos?.liquidity ?? raw.liquidity).toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.npm}/instance/${tokenId}`,
-    costBasisEstimated: costBasisEstimated || Boolean(pnl.costBasisMissing) || pnl.costBasisSource === "estimate",
     historyPending: opts.historyPending,
-    realizedPnlUsd: isOpen ? 0 : pnl.netPnlUsd,
-    unrealizedPnlUsd: isOpen ? pnl.netPnlUsd : 0,
   };
 
   if (isOpen) {
     console.log(
-      `[pnl] #${tokenId} incEvents=${pnl.increaseEventCount ?? 0} ` +
-        `depEth=${pnl.depositEth.toFixed(6)} curEth=${pnl.currentValueEth.toFixed(6)} ` +
-        `unclEth=${pnl.unclaimedFeesEth.toFixed(6)} netEth=${pnl.netPnlEth.toFixed(6)} ` +
-        `feeEth=${pnl.feePnlEth.toFixed(6)} priceEth=${pnl.pricePnlEth.toFixed(6)} ` +
-        `missing=${pnl.costBasisMissing}`,
+      `[pnl] #${tokenId} depUsd=${pnl.depositUsd.toFixed(2)} curUsd=${pnl.currentValueUsd.toFixed(2)} ` +
+        `netUsd=${pnl.netPnlUsd.toFixed(2)}`,
     );
   }
 
@@ -774,9 +721,7 @@ async function buildOneV4Position(
   }
 
   let currentValueUsd = 0;
-  let currentValueEth = 0;
   let unclaimedFeesUsd = 0;
-  let unclaimedFeesEth = 0;
   if (isOpen) {
     const principal = await valueDual(
       vp.amount0Human,
@@ -791,21 +736,31 @@ async function buildOneV4Position(
       vp.token1,
     );
     currentValueUsd = principal.usd;
-    currentValueEth = principal.eth;
     unclaimedFeesUsd = fees.usd;
-    unclaimedFeesEth = fees.eth;
   }
 
   const pnl = computePositionPnl({
     tokenId: vp.tokenId.toString(),
     events: priced,
     currentValueUsd,
-    currentValueEth,
     unclaimedFeesUsd,
-    unclaimedFeesEth,
     isOpen,
     mintDeposit,
   });
+
+  let closedTs: number | null = null;
+  if (!isOpen) {
+    for (const e of priced) {
+      if (!e.timestamp || e.timestamp < 1_000_000_000) continue;
+      if (
+        e.eventType === "decrease" ||
+        e.eventType === "collect" ||
+        e.eventType === "transfer_burn"
+      ) {
+        if (closedTs == null || e.timestamp > closedTs) closedTs = e.timestamp;
+      }
+    }
+  }
 
   // ── V4 Cashflow reconstruction + settlement finalization ──
   if (fetchEvents && priced.length > 0) {
@@ -827,8 +782,8 @@ async function buildOneV4Position(
           (e) =>
             (e.eventType === "decrease" || e.eventType === "collect") &&
             e.timestamp &&
-            pnl.closedAt &&
-            Math.abs(e.timestamp - pnl.closedAt) < 600,
+            closedTs &&
+            Math.abs(e.timestamp - closedTs) < 600,
         );
         let totalReceived = 0;
         for (const e of settlementEvents) {
@@ -845,9 +800,7 @@ async function buildOneV4Position(
           quoteToken: vp.token0,
           protocol: "v4",
           status: "closing",
-          openedAtBlock: pnl.openedAt
-            ? Math.floor(pnl.openedAt / 0.25)
-            : null,
+          openedAtBlock: null,
         });
 
         await finalizeCloseHistory(positionId);
@@ -876,15 +829,12 @@ async function buildOneV4Position(
     amount1Human: vp.amount1Human,
     liquidity: vp.liquidity.toString(),
     explorerUrl: `${ROBINHOOD.explorer}/token/${ROBINHOOD.v4PositionManager}/instance/${vp.tokenId}`,
-    costBasisEstimated: pnl.costBasisSource !== "mint" && pnl.costBasisSource !== "estimate",
     hasCustomHook: vp.hasCustomHook,
-    realizedPnlUsd: isOpen ? 0 : pnl.netPnlUsd,
-    unrealizedPnlUsd: isOpen ? pnl.netPnlUsd : 0,
   };
 
   console.log(
-    `[pnl v4] #${vp.tokenId} liq=${vp.liquidity} curEth=${currentValueEth.toFixed(6)} ` +
-      `unclEth=${unclaimedFeesEth.toFixed(6)} claimedEth=${pnl.feesCollectedEth.toFixed(6)} ` +
+    `[pnl v4] #${vp.tokenId} liq=${vp.liquidity} curUsd=${currentValueUsd.toFixed(2)} ` +
+      `unclUsd=${unclaimedFeesUsd.toFixed(2)} claimedUsd=${pnl.feesCollectedUsd.toFixed(2)} ` +
       `hook=${vp.hasCustomHook}`,
   );
 

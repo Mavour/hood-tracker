@@ -1,7 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
-import { formatSigned, formatUsd, formatEth } from "@/lib/utils";
+import { formatSigned } from "@/lib/utils";
 import type { Currency } from "./CurrencyToggle";
 import type { DayPnl } from "./PnlCalendar";
 import { Button } from "./ui/button";
@@ -15,11 +15,7 @@ export function DayDetailModal({
   currency: Currency;
   onClose: () => void;
 }) {
-  const net = currency === "usd" ? day.netPnlUsd : day.netPnlEth;
-  const fee =
-    currency === "usd" ? (day.feePnlUsd ?? 0) : (day.feePnlEth ?? 0);
-  const price =
-    currency === "usd" ? (day.pricePnlUsd ?? 0) : (day.pricePnlEth ?? 0);
+  const net = day.netPnlUsd;
   const cc = day.closeCount ?? 0;
   const wc = day.winCount ?? 0;
   const wr = cc > 0 ? `${((wc * 100) / cc).toFixed(1)}%` : "--";
@@ -54,16 +50,6 @@ export function DayDetailModal({
         </div>
 
         <div className="space-y-3 text-sm">
-          <Row
-            label="Fee PnL"
-            value={formatSigned(fee, currency)}
-            hint="Collected + unclaimed fees"
-          />
-          <Row
-            label="Price / IL PnL"
-            value={formatSigned(price, currency)}
-            hint="Impermanent loss / price movement"
-          />
           <div className="my-2 border-t border-rh-line" />
           <Row
             label="Positions opened"
@@ -109,7 +95,3 @@ function Row({
     </div>
   );
 }
-
-// silence unused
-void formatUsd;
-void formatEth;

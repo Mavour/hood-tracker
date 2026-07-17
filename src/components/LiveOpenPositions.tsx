@@ -1,22 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cn, formatSigned, formatPct, feeTierLabel } from "@/lib/utils";
+import { cn, formatSigned, formatPct } from "@/lib/utils";
 import type { Currency } from "./CurrencyToggle";
 
 type LiveRow = {
   tokenId: string;
   pool: string;
   depositValueUsd: number;
-  depositValueEth: number;
   currentValueUsd: number;
-  currentValueEth: number;
   unrealizedPnlUsd: number;
-  unrealizedPnlEth: number;
   feeUnclaimedUsd: number;
-  feeUnclaimedEth: number;
   feesCollectedUsd?: number;
-  feesCollectedEth?: number;
   inRange: boolean;
   lastUpdated: string;
   costBasisEstimated?: boolean;
@@ -25,13 +20,9 @@ type LiveRow = {
 
 type LiveTotals = {
   unrealizedPnlUsd: number;
-  unrealizedPnlEth: number;
   realizedPnlUsd: number;
-  realizedPnlEth: number;
   totalPnlUsd: number;
-  totalPnlEth: number;
   openValueUsd: number;
-  openValueEth: number;
   openCount: number;
 };
 
@@ -129,14 +120,10 @@ export function LiveOpenPositions({
       </div>
 
       {rows.map((r) => {
-        const pnl =
-          currency === "usd" ? r.unrealizedPnlUsd : r.unrealizedPnlEth;
-        const dep =
-          currency === "usd" ? r.depositValueUsd : r.depositValueEth;
-        const cur =
-          currency === "usd" ? r.currentValueUsd : r.currentValueEth;
-        const fee =
-          currency === "usd" ? r.feeUnclaimedUsd : r.feeUnclaimedEth;
+        const pnl = r.unrealizedPnlUsd;
+        const dep = r.depositValueUsd;
+        const cur = r.currentValueUsd;
+        const fee = r.feeUnclaimedUsd;
         const pct = dep > 1e-9 ? (pnl / dep) * 100 : null;
 
         return (
@@ -198,12 +185,7 @@ export function LiveOpenPositions({
               <Stat label="Now (+unclaimed)" value={formatSigned(cur, currency).replace(/^\+/, "")} />
               <Stat
                 label="Claimed fees"
-                value={formatSigned(
-                  currency === "usd"
-                    ? (r.feesCollectedUsd ?? 0)
-                    : (r.feesCollectedEth ?? 0),
-                  currency,
-                )}
+                value={formatSigned(r.feesCollectedUsd ?? 0, currency)}
               />
               <Stat label="Unclaimed fees" value={formatSigned(fee, currency)} />
             </div>
@@ -222,5 +204,3 @@ function Stat({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
-void feeTierLabel;

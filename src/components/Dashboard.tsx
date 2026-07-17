@@ -16,28 +16,15 @@ import { LiveOpenPositions } from "./LiveOpenPositions";
 import { Button } from "./ui/button";
 
 type Summary = {
-  netPnlUsd: number;
-  netPnlEth: number;
-  feePnlUsd: number;
-  feePnlEth: number;
-  pricePnlUsd: number;
-  pricePnlEth: number;
   depositUsd: number;
-  depositEth: number;
   currentValueUsd: number;
-  currentValueEth: number;
   unclaimedFeesUsd: number;
-  unclaimedFeesEth: number;
   realizedPnlUsd?: number;
-  realizedPnlEth?: number;
   unrealizedPnlUsd?: number;
-  unrealizedPnlEth?: number;
   totalPnlUsd?: number;
-  totalPnlEth?: number;
   openCount: number;
   closedCount: number;
-  pnlPctUsd: number | null;
-  pnlPctEth: number | null;
+  pnlBps: number | null;
 };
 
 type JobStatus = {
@@ -60,10 +47,7 @@ export function Dashboard({ address }: { address: string }) {
   const [daily, setDaily] = useState<DayPnl[]>([]);
   const [computedAt, setComputedAt] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<DayPnl | null>(null);
-  const [liveUnrealized, setLiveUnrealized] = useState<{
-    usd: number;
-    eth: number;
-  } | null>(null);
+  const [liveUnrealized, setLiveUnrealized] = useState<number | null>(null);
 
   /** Bumps on unmount / new track so stale polls stop. */
   const genRef = useRef(0);
@@ -259,45 +243,20 @@ export function Dashboard({ address }: { address: string }) {
     void runTrack(true, gen);
   };
 
-  const realized =
-    summary &&
-    (currency === "usd"
-      ? (summary.realizedPnlUsd ?? 0)
-      : (summary.realizedPnlEth ?? 0));
-  const unrealizedBase =
-    summary &&
-    (currency === "usd"
-      ? (summary.unrealizedPnlUsd ?? 0)
-      : (summary.unrealizedPnlEth ?? 0));
-  const unrealizedLive =
-    liveUnrealized != null
-      ? currency === "usd"
-        ? liveUnrealized.usd
-        : liveUnrealized.eth
-      : null;
+  const realized = summary && (summary.realizedPnlUsd ?? 0);
+  const unrealizedBase = summary && (summary.unrealizedPnlUsd ?? 0);
+  const unrealizedLive = liveUnrealized;
   const unrealized = unrealizedLive ?? unrealizedBase ?? 0;
-  const net =
-    summary &&
-    (realized ?? 0) + unrealized;
-  const fee =
-    summary &&
-    (currency === "usd" ? summary.feePnlUsd : summary.feePnlEth);
-  const price =
-    summary &&
-    (currency === "usd" ? summary.pricePnlUsd : summary.pricePnlEth);
-  const dep =
-    summary &&
-    (currency === "usd" ? summary.depositUsd : summary.depositEth);
-  const cur =
-    summary &&
-    (currency === "usd" ? summary.currentValueUsd : summary.currentValueEth);
+  const net = summary && (realized ?? 0) + unrealized;
+  const fee = summary && 0;
+  const price = summary && 0;
+  const dep = summary && summary.depositUsd;
+  const cur = summary && summary.currentValueUsd;
   const pct =
-    summary && dep && dep > 1e-9 && net != null
-      ? (net / dep) * 100
-      : summary
-        ? currency === "usd"
-          ? summary.pnlPctUsd
-          : summary.pnlPctEth
+    summary && summary.pnlBps != null
+      ? summary.pnlBps / 100
+      : summary && dep && dep > 1e-9 && net != null
+        ? (net / dep) * 100
         : null;
 
   return (
@@ -518,17 +477,12 @@ export function Dashboard({ address }: { address: string }) {
                   currency={currency}
                   onTotals={(t) => {
                     if (!t) return;
-                    setLiveUnrealized({
-                      usd: t.unrealizedPnlUsd,
-                      eth: t.unrealizedPnlEth,
-                    });
+                    setLiveUnrealized(t.unrealizedPnlUsd);
                     if (summary) {
                       setSummary({
                         ...summary,
                         currentValueUsd: t.openValueUsd,
-                        currentValueEth: t.openValueEth,
                         unrealizedPnlUsd: t.unrealizedPnlUsd,
-                        unrealizedPnlEth: t.unrealizedPnlEth,
                       });
                     }
                   }}

@@ -1,8 +1,6 @@
 /**
  * Live / unrealized value for an OPEN LP position.
- * Reuses cached position meta from index; only refreshes slot0 + tokensOwed via RPC.
- * Supports both V3 (NPM) and V4 (StateView) positions.
- * Spec addendum: lib/pnl/getLiveValue.ts
+ * Simplified to match UniLP-Monitoring data model — USD only, no ETH fields.
  */
 
 import { type Address, type Hex, pad, toHex } from "viem";
@@ -30,13 +28,9 @@ export type CachedPositionMeta = {
   symbol0: string;
   symbol1: string;
   fee: number;
-  /** cost basis from indexed events */
   depositUsd: number;
-  depositEth: number;
   feesCollectedUsd: number;
-  feesCollectedEth: number;
   withdrawnUsd: number;
-  withdrawnEth: number;
   protocol?: "v3" | "v4";
   poolId?: string | null;
 };
@@ -44,20 +38,13 @@ export type CachedPositionMeta = {
 export type LiveValueResult = {
   tokenId: string;
   currentValueUsd: number;
-  currentValueEth: number;
   feeUnclaimedUsd: number;
-  feeUnclaimedEth: number;
-  /** principal only (amounts from liquidity, excl unclaimed fees) */
   principalUsd: number;
-  principalEth: number;
   unrealizedPnlUsd: number;
-  unrealizedPnlEth: number;
   inRange: boolean;
   amount0Human: number;
   amount1Human: number;
   lastUpdated: string;
-  /** true when deposit is unknown — PnL cannot be computed */
-  depositMissing?: boolean;
 };
 
 const SLOT0_TTL_MS = 10_000;
@@ -116,10 +103,7 @@ async function readTokensOwed(tokenId: bigint): Promise<{
 }
 
 /**
- * Compute live mark + unrealized PnL for one open position.
- * V3: reads NPM positions() + pool slot0 + V3 fee growth.
- * V4: reads StateView getSlot0 + V4 fee growth (no NPM needed).
- * unrealized = currentValue + unclaimedFees + withdrawn + feesCollected - deposit
+ * Compute live mark + unrealized PnL for one open position (USD only).
  */
 export async function getLiveValue(
   meta: CachedPositionMeta,
@@ -144,7 +128,6 @@ export async function getLiveValue(
   let slot0Ready = false;
 
   if (isV4) {
-    // V4: use StateView for slot0 + V4 fee growth
     const poolId = (meta.poolId as Hex) || null;
     if (!poolId) {
       console.warn("[getLiveValue] v4 missing poolId", meta.tokenId);
@@ -190,7 +173,6 @@ export async function getLiveValue(
       console.warn("[getLiveValue] v4 slot0", meta.tokenId, e);
     }
 
-    // V4 fee growth (serialized to avoid 429s)
     if (liquidity > 0n) {
       try {
         const inside = await throttled(() => client.readContract({
@@ -215,22 +197,13 @@ export async function getLiveValue(
         const last0 = posInfo[1] as bigint;
         const last1 = posInfo[2] as bigint;
         const liqPos = (posInfo[0] as bigint) || liquidity;
-        f0Raw = feesFromGrowth(
-          inside[0] as bigint,
-          last0,
-          liqPos,
-        );
-        f1Raw = feesFromGrowth(
-          inside[1] as bigint,
-          last1,
-          liqPos,
-        );
+        f0Raw = feesFromGrowth(inside[0] as bigint, last0, liqPos);
+        f1Raw = feesFromGrowth(inside[1] as bigint, last1, liqPos);
       } catch (e) {
         console.warn("[getLiveValue] v4 fees", meta.tokenId, e);
       }
     }
   } else {
-    // V3 path
     const owed = await readTokensOwed(tokenId);
     liquidity = owed.liquidity > 0n ? owed.liquidity : liqCached;
     f0Raw = owed.tokensOwed0;
@@ -240,8 +213,7 @@ export async function getLiveValue(
       try {
         const slot = await readSlot0(meta.poolAddress as Address);
         currentTick = slot.tick;
-        inRange =
-          currentTick >= meta.tickLower && currentTick < meta.tickUpper;
+        inRange = currentTick >= meta.tickLower && currentTick < meta.tickUpper;
         const am = getAmountsForLiquidity(
           slot.sqrtPriceX96,
           meta.tickLower,
@@ -279,35 +251,30 @@ export async function getLiveValue(
   const f0 = humanAmount(f0Raw, meta.decimals0);
   const f1 = humanAmount(f1Raw, meta.decimals1);
 
-  let p0: { usd: number; eth: number };
-  let p1: { usd: number; eth: number };
+  let price0Usd: number;
+  let price1Usd: number;
 
-  // Use pool address directly when available (bypasses fee-tier guessing)
   if (isV4 && slot0Ready) {
-    // V4: compute prices from the pool's own sqrtPriceX96 (works for V4-only
-    // tokens like VEX that have no V3 pools). getTokenPriceLive only searches V3.
     const p0in1 = price0In1FromSqrt(slot0Sqrt, meta.decimals0, meta.decimals1);
     const ethUsd = await ethUsdLive();
     const usdgLc = ROBINHOOD.usdg.toLowerCase();
-    const wethLc = ROBINHOOD.wrapped.toLowerCase();
     const t0Lc = (meta.token0 ?? "").toLowerCase();
     const t1Lc = (meta.token1 ?? "").toLowerCase();
     if (t0Lc === usdgLc) {
-      p0 = { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0 };
-      p1 = { usd: p0in1 > 0 ? 1 / p0in1 : 0, eth: ethUsd > 0 && p0in1 > 0 ? 1 / p0in1 / ethUsd : 0 };
+      price0Usd = 1;
+      price1Usd = p0in1 > 0 ? 1 / p0in1 : 0;
     } else if (t1Lc === usdgLc) {
-      p0 = { usd: p0in1, eth: ethUsd > 0 ? p0in1 / ethUsd : 0 };
-      p1 = { usd: 1, eth: ethUsd > 0 ? 1 / ethUsd : 0 };
-    } else if (t0Lc === wethLc) {
-      p0 = { usd: ethUsd, eth: 1 };
-      p1 = { usd: p0in1 > 0 ? ethUsd / p0in1 : 0, eth: p0in1 > 0 ? 1 / p0in1 : 0 };
-    } else if (t1Lc === wethLc) {
-      p0 = { usd: p0in1 * ethUsd, eth: p0in1 };
-      p1 = { usd: ethUsd, eth: 1 };
+      price0Usd = p0in1;
+      price1Usd = 1;
+    } else if (t0Lc === ROBINHOOD.wrapped.toLowerCase()) {
+      price0Usd = ethUsd;
+      price1Usd = p0in1 > 0 ? ethUsd / p0in1 : 0;
+    } else if (t1Lc === ROBINHOOD.wrapped.toLowerCase()) {
+      price0Usd = p0in1 * ethUsd;
+      price1Usd = ethUsd;
     } else {
-      // Generic pair — bridge via WETH
-      p0 = { usd: p0in1 * ethUsd, eth: p0in1 };
-      p1 = { usd: p0in1 > 0 ? ethUsd / p0in1 : 0, eth: p0in1 > 0 ? 1 / p0in1 : 0 };
+      price0Usd = p0in1 * ethUsd;
+      price1Usd = p0in1 > 0 ? ethUsd / p0in1 : 0;
     }
   } else if (meta.poolAddress && !isV4) {
     const pp = await getPairPriceLiveFromPool(
@@ -317,56 +284,35 @@ export async function getLiveValue(
       meta.decimals0,
       meta.decimals1,
     );
-    p0 = { usd: pp.price0Usd, eth: pp.price0Eth };
-    p1 = { usd: pp.price1Usd, eth: pp.price1Eth };
+    price0Usd = pp.price0Usd;
+    price1Usd = pp.price1Usd;
   } else {
     const [p0r, p1r] = await Promise.all([
       getTokenPriceLive(meta.token0 as Address),
       getTokenPriceLive(meta.token1 as Address),
     ]);
-    p0 = p0r;
-    p1 = p1r;
+    price0Usd = p0r.usd;
+    price1Usd = p1r.usd;
   }
 
-  const principalUsd = a0 * p0.usd + a1 * p1.usd;
-  const principalEth = a0 * p0.eth + a1 * p1.eth;
-  const feeUnclaimedUsd = f0 * p0.usd + f1 * p1.usd;
-  const feeUnclaimedEth = f0 * p0.eth + f1 * p1.eth;
+  const principalUsd = a0 * price0Usd + a1 * price1Usd;
+  const feeUnclaimedUsd = f0 * price0Usd + f1 * price1Usd;
   const currentValueUsd = principalUsd;
-  const currentValueEth = principalEth;
 
   // PnL = (current + unclaimed) - deposit. Without deposit, PnL is unknown.
-  const depositMissing = meta.depositUsd <= 0 && meta.depositEth <= 0;
-
-  const unrealizedPnlUsd = depositMissing
+  const unrealizedPnlUsd = meta.depositUsd <= 0
     ? 0
-    : meta.withdrawnUsd +
-      meta.feesCollectedUsd +
-      currentValueUsd +
-      feeUnclaimedUsd -
-      meta.depositUsd;
-  const unrealizedPnlEth = depositMissing
-    ? 0
-    : meta.withdrawnEth +
-      meta.feesCollectedEth +
-      currentValueEth +
-      feeUnclaimedEth -
-      meta.depositEth;
+    : meta.withdrawnUsd + meta.feesCollectedUsd + currentValueUsd + feeUnclaimedUsd - meta.depositUsd;
 
   return {
     tokenId: meta.tokenId,
     currentValueUsd,
-    currentValueEth,
     feeUnclaimedUsd,
-    feeUnclaimedEth,
     principalUsd,
-    principalEth,
     unrealizedPnlUsd,
-    unrealizedPnlEth,
     inRange,
     amount0Human: a0,
     amount1Human: a1,
     lastUpdated: new Date().toISOString(),
-    depositMissing,
   };
 }
