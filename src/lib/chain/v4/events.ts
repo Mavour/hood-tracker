@@ -642,6 +642,9 @@ export async function fetchModifyLiquidityFromTxs(
     }
     const txHasMySalt = txModifySalts.has(saltHex);
 
+    // Second pass: process ModifyLiquidity events first to capture principal amounts
+    // from "decrease" events. We need these to subtract from Transfer values later.
+    const decreasePrincipal = { amount0Raw: 0n, amount1Raw: 0n };
     for (const log of logs) {
       const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
 
@@ -688,17 +691,26 @@ export async function fetchModifyLiquidityFromTxs(
           amount0Raw: amount0,
           amount1Raw: amount1,
         });
-      }
 
-      // ERC20 Transfer — detect fee collections (incoming to owner).
-      // Salt-gated: accept if this tx has ModifyLiquidity with THIS position's salt.
-      // Standalone collects (no ModifyLiquidity): accept only once per tx across all
-      // positions via attributedStandaloneCollects tracker — prevents loss (old bug)
-      // and duplication (multi-position pools). Total owner fees remain accurate.
-      const isStandaloneCollect = txModifySalts.size === 0;
-      const canCollect = txHasMySalt || (isStandaloneCollect && !attributedStandaloneCollects.has(txHash));
-      if ((log.topics[0] ?? "") === TRANSFER_TOPIC && owner && canCollect) {
-        const ownerLc = owner.toLowerCase();
+        // Track principal from decrease events to subtract from Transfer values later
+        if (eventType === "decrease") {
+          decreasePrincipal.amount0Raw += amount0;
+          decreasePrincipal.amount1Raw += amount1;
+        }
+      }
+    }
+
+    // Third pass: process ERC20 Transfer events for fee collection
+    // Subtract principal (from decrease) from Transfer value to get pure fees
+    const isStandaloneCollect = txModifySalts.size === 0;
+    const canCollect = txHasMySalt || (isStandaloneCollect && !attributedStandaloneCollects.has(txHash));
+    if (!owner || !canCollect) continue;
+
+    const ownerLc = owner.toLowerCase();
+    for (const log of logs) {
+      const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
+
+      if ((log.topics[0] ?? "") === TRANSFER_TOPIC) {
         const fromAddr = ("0x" + ((log.topics[1] ?? "").slice(26))).toLowerCase();
         const toAddr = ("0x" + ((log.topics[2] ?? "").slice(26))).toLowerCase();
 
@@ -709,15 +721,32 @@ export async function fetchModifyLiquidityFromTxs(
           (fromAddr === pm || fromAddr === posm)
         ) {
           if (hex.length >= 64) {
-            const value = BigInt("0x" + hex.slice(0, 64));
-            if (value > 0n) {
-              const tokenAddr = log.address.toLowerCase();
-              const isToken0 = t0 ? tokenAddr === t0 : false;
-              const isToken1 = t1 ? tokenAddr === t1 : false;
-              if (!isToken0 && !isToken1) continue;
+            const rawValue = BigInt("0x" + hex.slice(0, 64));
+            if (rawValue === 0n) continue;
+
+            const tokenAddr = log.address.toLowerCase();
+            const isToken0 = t0 ? tokenAddr === t0 : false;
+            const isToken1 = t1 ? tokenAddr === t1 : false;
+            if (!isToken0 && !isToken1) continue;
+
+            // Subtract principal that was already recorded as "decrease" in this tx
+            // The Transfer combines principal + fees; we only want the fee portion
+            let feeValue = rawValue;
+            if (isToken0 && decreasePrincipal.amount0Raw > 0n) {
+              const used = decreasePrincipal.amount0Raw < feeValue ? decreasePrincipal.amount0Raw : feeValue;
+              feeValue -= used;
+              decreasePrincipal.amount0Raw -= used;
+            } else if (isToken1 && decreasePrincipal.amount1Raw > 0n) {
+              const used = decreasePrincipal.amount1Raw < feeValue ? decreasePrincipal.amount1Raw : feeValue;
+              feeValue -= used;
+              decreasePrincipal.amount1Raw -= used;
+            }
+
+            // Only record as "collect" if there's actual fee value remaining
+            if (feeValue > 0n) {
               if (isStandaloneCollect) attributedStandaloneCollects.add(txHash);
-              const a0 = isToken0 ? value : 0n;
-              const a1 = isToken1 ? value : 0n;
+              const a0 = isToken0 ? feeValue : 0n;
+              const a1 = isToken1 ? feeValue : 0n;
               events.push({
                 tokenId,
                 eventType: "collect",
@@ -725,8 +754,8 @@ export async function fetchModifyLiquidityFromTxs(
                 txHash: txHash as Hex,
                 logIndex: 0,
                 timestamp: 0,
-                amount0: isToken0 ? humanAmount(value, decimals0) : 0,
-                amount1: isToken1 ? humanAmount(value, decimals1) : 0,
+                amount0: isToken0 ? humanAmount(feeValue, decimals0) : 0,
+                amount1: isToken1 ? humanAmount(feeValue, decimals1) : 0,
                 amount0Raw: a0,
                 amount1Raw: a1,
               });
