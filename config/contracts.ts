@@ -73,5 +73,14 @@ export function explorerAddress(addr: string): string {
 }
 
 export function explorerToken(tokenId: string | number | bigint): string {
-  return `${ROBINHOOD.explorer}/token/${getNpmAddress()}/instance/${tokenId}`;
+  return explorerNft("v3", tokenId);
+}
+
+export function explorerNft(
+  protocol: "v3" | "v4",
+  tokenId: string | number | bigint,
+): string {
+  const contract =
+    protocol === "v4" ? ROBINHOOD.v4PositionManager : getNpmAddress();
+  return `${ROBINHOOD.explorer}/token/${contract}/instance/${tokenId}`;
 }

@@ -9,6 +9,19 @@ export function isValidEthAddress(addr: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(addr);
 }
 
+/** Decimal Uniswap position NFT id (optional leading #). */
+export function parseNftTokenId(raw: string): bigint | null {
+  const s = raw.trim().replace(/^#/, "");
+  if (!/^\d+$/.test(s)) return null;
+  try {
+    const n = BigInt(s);
+    if (n <= 0n) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
 export function shortAddress(addr: string): string {
   if (!addr || addr.length < 10) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;

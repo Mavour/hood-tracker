@@ -1,6 +1,8 @@
 import Image from "next/image";
+import Link from "next/link";
 import { TrackForm } from "@/components/TrackForm";
 import { BrandMark } from "@/components/BrandMark";
+import { SiteNav } from "@/components/SiteNav";
 import {
   Activity,
   Layers,
@@ -31,13 +33,19 @@ export default function HomePage() {
 
       <header className="relative z-20 border-b border-white/[0.07] bg-black/30 backdrop-blur-2xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-8">
-          <BrandMark size="md" />
+          <span className="sm:hidden">
+            <BrandMark compact size="sm" />
+          </span>
+          <span className="hidden sm:block">
+            <BrandMark size="md" />
+          </span>
           <nav className="flex items-center gap-2 sm:gap-3">
+            <SiteNav active="track" />
             <span className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] font-medium text-rh-soft md:inline-flex">
               <Zap className="h-3.5 w-3.5 text-rh-neon" />
               First paint &lt; 10s
             </span>
-            <span className="inline-flex items-center gap-2 rounded-full border border-rh-neon/30 bg-rh-neon/10 px-3 py-1.5 text-[11px] font-bold text-rh-neon">
+            <span className="hidden items-center gap-2 rounded-full border border-rh-neon/30 bg-rh-neon/10 px-3 py-1.5 text-[11px] font-bold text-rh-neon sm:inline-flex">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rh-neon opacity-60" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-rh-neon" />
@@ -89,6 +97,15 @@ export default function HomePage() {
           <div className="mt-8 rh-card-glow p-3 sm:p-4">
             <TrackForm />
           </div>
+          <p className="mt-3 text-sm text-rh-muted">
+            Have an NFT id instead?{" "}
+            <Link
+              href="/nft"
+              className="font-semibold text-rh-neon hover:underline"
+            >
+              Look up by LP NFT ID
+            </Link>
+          </p>
 
           <div className="mt-6 flex flex-wrap gap-2">
             {["Read-only", "No keys", "V3 + V4", "Claimed fees"].map((t) => (
