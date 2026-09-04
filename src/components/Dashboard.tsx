@@ -14,7 +14,6 @@ import { DayDetailModal } from "./DayDetailModal";
 import { PositionList, type PositionRow } from "./PositionList";
 import { LiveOpenPositions } from "./LiveOpenPositions";
 import { Button } from "./ui/button";
-import { apiUrl } from "@/lib/base-path";
 
 type Summary = {
   depositUsd: number;
@@ -55,7 +54,7 @@ export function Dashboard({ address }: { address: string }) {
 
   const loadPnl = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await fetch(apiUrl(`/api/pnl/${address}`), { cache: "no-store" });
+      const res = await fetch(`/api/pnl/${address}`, { cache: "no-store" });
       if (!res.ok) return false;
       const data = await res.json();
       if (data.ready) {
@@ -102,7 +101,7 @@ export function Dashboard({ address }: { address: string }) {
   const fetchJobStatus = useCallback(async (): Promise<JobStatus | null> => {
     try {
       const res = await fetch(
-        apiUrl(`/api/track?address=${encodeURIComponent(address)}`),
+        `/api/track?address=${encodeURIComponent(address)}`,
         { cache: "no-store" },
       );
       // API always returns 200 for known query shapes; treat non-ok as soft fail
@@ -122,7 +121,7 @@ export function Dashboard({ address }: { address: string }) {
       setProgressMsg("Starting…");
 
       try {
-        const res = await fetch(apiUrl("/api/track"), {
+        const res = await fetch("/api/track", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ address, force }),

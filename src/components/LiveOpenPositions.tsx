@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn, formatSigned, formatPct } from "@/lib/utils";
-import { apiUrl } from "@/lib/base-path";
 import type { Currency } from "./CurrencyToggle";
 
 type LiveRow = {
@@ -49,7 +48,7 @@ export function LiveOpenPositions({
   const load = useCallback(async () => {
     if (!visible.current) return;
     try {
-      const res = await fetch(apiUrl(`/api/pnl/${address}/live`), {
+      const res = await fetch(`/api/pnl/${address}/live`, {
         cache: "no-store",
       });
       if (!res.ok) {
