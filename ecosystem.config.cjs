@@ -4,7 +4,7 @@ module.exports = {
     {
       name: "hood-tracker",
       script: "node_modules/next/dist/bin/next",
-      args: "start -p 3000",
+      args: "start -p 1507",
       instances: 1,
       exec_mode: "fork",
       env: {

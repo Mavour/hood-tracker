@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 1507",
     "lint": "next lint",
     "test:pnl": "tsx src/lib/pnl/compute.test.ts",
     "worker": "tsx worker/index.ts",
