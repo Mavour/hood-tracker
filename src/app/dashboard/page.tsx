@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Dashboard } from "@/components/Dashboard";
 import { BrandMark } from "@/components/BrandMark";
@@ -25,14 +26,14 @@ export default function DashboardPage({
 
       <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-black/55 backdrop-blur-2xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <a href="/" className="min-w-0 transition hover:opacity-90">
+          <Link href="/" className="min-w-0 transition hover:opacity-90">
             <span className="sm:hidden">
               <BrandMark compact size="sm" />
             </span>
             <span className="hidden sm:block">
               <BrandMark />
             </span>
-          </a>
+          </Link>
           <div className="flex items-center gap-2 sm:gap-3">
             <SiteNav active="track" />
             <span className="hidden text-[11px] font-semibold text-rh-muted lg:inline">

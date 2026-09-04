@@ -20,6 +20,7 @@ import {
   shortAddress,
 } from "@/lib/utils";
 import type { NftLookupHit, NftLookupResult } from "@/lib/chain/nft-lookup";
+import { apiUrl } from "@/lib/base-path";
 
 function formatWhen(iso: string | null): string | null {
   if (!iso) return null;
@@ -341,7 +342,7 @@ export function NftLookup() {
       setResult(null);
       router.replace(`/nft?id=${id.toString()}`, { scroll: false });
       try {
-        const res = await fetch(`/api/nft/${id.toString()}`, {
+        const res = await fetch(apiUrl(`/api/nft/${id.toString()}`), {
           cache: "no-store",
           signal: ac.signal,
         });

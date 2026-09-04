@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import { BrandMark } from "@/components/BrandMark";
 import { SiteNav } from "@/components/SiteNav";
 import { NftLookup } from "@/components/NftLookup";
@@ -29,14 +30,14 @@ export default function NftLookupPage() {
 
       <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-black/55 backdrop-blur-2xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <a href="/" className="min-w-0 transition hover:opacity-90">
+          <Link href="/" className="min-w-0 transition hover:opacity-90">
             <span className="sm:hidden">
               <BrandMark compact size="sm" />
             </span>
             <span className="hidden sm:block">
               <BrandMark />
             </span>
-          </a>
+          </Link>
           <SiteNav active="nft" />
         </div>
       </header>
