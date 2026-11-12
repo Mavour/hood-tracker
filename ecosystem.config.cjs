@@ -22,5 +22,15 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      name: "hood-lp-watcher",
+      script: "node_modules/tsx/dist/cli.mjs",
+      args: "worker/watch.ts",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      stop_exit_codes: [0, 2],
+      env: { NODE_ENV: "production" },
+    },
   ],
 };

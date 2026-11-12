@@ -166,6 +166,72 @@ Then: `certbot --nginx -d pnl.example.com`
 - Historical ETH/USD ideally via Chainlink rounds; current code uses live ETH/USD as approximation when historical oracle rounds are not configured.
 - Rate-limited `POST /api/track` to protect Alchemy compute units.
 
+## Multi-wallet LP Watcher / Agent Dorm
+
+A separate read-only watcher runs without an open browser, Redis, wallet connection,
+private key, or signing capability. Existing Next.js routes and the BullMQ worker are
+unchanged. The watcher discovers held V3/V4 NFTs and refreshes their current amounts,
+spot valuation, estimated unclaimed fees, and range status, one wallet at a time.
+
+Set these values in the project's `.env` (public wallet addresses only):
+
+```dotenv
+LP_WATCHER_ENABLED=true
+LP_WATCHLIST='[{"address":"YOUR_PUBLIC_EVM_ADDRESS","label":"Main"},{"address":"ANOTHER_PUBLIC_EVM_ADDRESS","label":"Second"}]'
+LP_WATCHER_API_KEY=YOUR_SEPARATE_RANDOM_KEY_AT_LEAST_16_CHARACTERS
+LP_WATCHER_HOST=127.0.0.1
+LP_WATCHER_PORT=9003
+LP_WATCH_INTERVAL_SECONDS=60
+```
+
+Replace the placeholders; no example wallet is enabled by default. Addresses are
+deduplicated case-insensitively. Restart the watcher after editing its configuration.
+Each cycle visits every configured wallet sequentially, then waits the configured
+interval (minimum 30 seconds). Slow RPC responses extend the cycle. No cycle overlaps
+another. Run with `npm run watch:lp`, or `pm2 start ecosystem.config.cjs --only hood-lp-watcher`.
+Disabled or invalid configuration stops rather than repeatedly restarting under PM2.
+Use Node.js 20+ as required by the existing tooling.
+
+API, bound to loopback by default:
+
+- `GET /health`: process liveness only; contains no wallet information.
+- `GET /status`: requires `Authorization: Bearer <LP_WATCHER_API_KEY>` and returns
+  `agentId: "lpwatcher"`, combined `metrics.positions` / `metrics.totals`, and
+  `metrics.wallets` with each wallet's per-protocol last success and stale/error status.
+- All other routes return 404; non-GET methods return 405. Requests read the in-memory
+  snapshot only, never trigger RPC, index jobs, database writes, or transactions.
+
+For Agent Dorm, use HTTP mode with URL `http://127.0.0.1:9003` and the same API key.
+The service does not edit Dorm configuration or restart either application.
+Across machines use a private network / authenticated HTTPS proxy; do not expose an
+unencrypted financial API publicly.
+
+Data semantics and limits:
+
+- NFT balance and ownership are checked against the chain. Failed/partial discovery
+  retains the previous successful protocol snapshot and marks it stale. A successful
+  empty scan removes closed/transferred positions. Stable IDs include chain, manager,
+  and token ID; an NFT moving between watched wallets is counted once.
+- Existing V3 enumeration is limited to 100 NFTs; V4 discovery currently depends on
+  Alchemy for nonempty wallets. Provider limitations or count mismatches are reported
+  as incomplete scans, never as a successfully empty wallet. Configure the existing
+  RPC settings accordingly. No unrelated provider/indexer behavior has been changed.
+- Values are current spot estimates including unclaimed fees, not guaranteed exit
+  proceeds. Missing USD pricing is `null` per position. Fee growth helpers can fall
+  back to owed tokens, so fees are explicitly marked estimated/unclaimed-only.
+- This worker does not reconstruct historical deposits/withdrawals. Per-position
+  PnL, IL and opening time remain `null`. It never presents an estimated cost basis as
+  verified PnL. Historical calculations in the existing dashboard remain unchanged.
+- Dorm's numeric totals are **known subtotals**, including retained last-known data;
+  check `metrics.totalsComplete`, `totalsAreKnownSubtotals`, `feesBasis`, per-position
+  `stale`, and alerts before presenting them as complete. A numeric PnL subtotal of
+  zero with `totalsComplete.unrealizedPnlUsd=false` means unknown, not zero profit/loss.
+- Last-good snapshots are kept in memory for the current process. After restart the
+  API shows pending warnings until each wallet has been scanned again. Wallet lists
+  persist in configuration. Nothing reads or modifies private keys.
+
+Verification: `npm run test:watcher`, `npm run test:pnl`, and `npx tsc --noEmit`.
+
 ## License
 
 MIT

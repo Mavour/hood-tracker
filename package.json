@@ -10,7 +10,9 @@
     "test:pnl": "tsx src/lib/pnl/compute.test.ts",
     "worker": "tsx worker/index.ts",
     "db:up": "docker compose up -d",
-    "db:down": "docker compose down"
+    "db:down": "docker compose down",
+    "watch:lp": "tsx worker/watch.ts",
+    "test:watcher": "tsx --test src/lib/watcher/watcher.test.ts"
   },
   "dependencies": {
     "@uniswap/sdk-core": "^7.18.0",
